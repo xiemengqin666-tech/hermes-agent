@@ -174,18 +174,16 @@ class TestOverflowFirstMessage:
 
 
 class TestFeishuFallbackThreadRouting:
-    """Verify FeishuAdapter._send_raw_message routes to topic on fallback."""
+    """Verify FeishuAdapter._send_raw_message flattens replies by default."""
 
     @pytest.mark.asyncio
-    async def test_create_uses_thread_id_when_available(self):
-        """When reply_to=None and metadata has thread_id, message.create
-        should use receive_id_type='thread_id'."""
+    async def test_create_uses_chat_id_even_when_thread_id_available(self):
+        """Feishu should post a fresh group message by default, even when
+        metadata carries a topic/thread id."""
+        from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
 
-        # We test the _send_raw_message method directly by mocking the client
-        adapter = MagicMock(spec=FeishuAdapter)
-
-        # Set up the real _send_raw_message logic manually
+        adapter = FeishuAdapter(PlatformConfig())
         mock_client = MagicMock()
         mock_create_response = SimpleNamespace(
             success=lambda: True,
@@ -193,13 +191,7 @@ class TestFeishuFallbackThreadRouting:
         )
         mock_client.im.v1.message.create = MagicMock(return_value=mock_create_response)
 
-        # Use the real implementation path
         adapter._client = mock_client
-        adapter._build_create_message_body = FeishuAdapter._build_create_message_body
-        adapter._build_create_message_request = FeishuAdapter._build_create_message_request
-        # _send_raw_message routes blocking SDK calls through _run_blocking
-        # (adapter-owned executor). On a MagicMock(spec=...) that method is
-        # auto-mocked and would swallow the real call, so wire a passthrough.
         async def _run_blocking_passthrough(func, *args):
             return func(*args)
         adapter._run_blocking = _run_blocking_passthrough
@@ -218,31 +210,70 @@ class TestFeishuFallbackThreadRouting:
         # Verify message.create was called (not message.reply)
         mock_client.im.v1.message.create.assert_called_once()
 
-        # The request should have receive_id_type="thread_id"
+        # The request should target the main chat, not the thread/topic.
         call_args = mock_client.im.v1.message.create.call_args[0][0]
         # Lark SDK builder exposes .body; the in-tree fallback exposes .request_body.
         # The contributor's branch had the lark SDK installed, the test environment
         # may not — handle both shapes.
         body = getattr(call_args, "body", None) or getattr(call_args, "request_body", None)
         assert body is not None, "request has neither .body nor .request_body"
-        # receive_id should be the thread_id, not the chat_id
         receive_id = getattr(body, "receive_id", None)
         if receive_id is None and isinstance(body, str):
             import json as _json
             receive_id = _json.loads(body).get("receive_id")
-        assert receive_id == "omt_topic_abc", (
-            f"Expected receive_id='omt_topic_abc', got '{receive_id}'"
+        assert receive_id == "oc_main_chat", (
+            f"Expected receive_id='oc_main_chat', got '{receive_id}'"
         )
-        # And receive_id_type must be 'thread_id', not 'chat_id'
+        # And receive_id_type must be 'chat_id', not 'thread_id'.
         receive_id_type = getattr(call_args, "receive_id_type", None)
-        assert receive_id_type == "thread_id", (
-            f"Expected receive_id_type='thread_id', got '{receive_id_type}'"
+        assert receive_id_type == "chat_id", (
+            f"Expected receive_id_type='chat_id', got '{receive_id_type}'"
         )
+
+    @pytest.mark.asyncio
+    async def test_create_can_use_thread_id_when_flat_replies_disabled(self):
+        """Explicit opt-out preserves the old topic routing behaviour."""
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig(extra={"flat_replies": False}))
+        mock_client = MagicMock()
+        mock_create_response = SimpleNamespace(
+            success=lambda: True,
+            data=SimpleNamespace(message_id="new_msg_1"),
+        )
+        mock_client.im.v1.message.create = MagicMock(return_value=mock_create_response)
+        adapter._client = mock_client
+
+        async def _run_blocking_passthrough(func, *args):
+            return func(*args)
+
+        adapter._run_blocking = _run_blocking_passthrough
+
+        import json
+        await adapter._send_raw_message(
+            chat_id="oc_main_chat",
+            msg_type="text",
+            payload=json.dumps({"text": "hello"}),
+            reply_to=None,
+            metadata={"thread_id": "omt_topic_abc"},
+        )
+
+        call_args = mock_client.im.v1.message.create.call_args[0][0]
+        body = getattr(call_args, "body", None) or getattr(call_args, "request_body", None)
+        assert body is not None, "request has neither .body nor .request_body"
+        receive_id = getattr(body, "receive_id", None)
+        if receive_id is None and isinstance(body, str):
+            import json as _json
+            receive_id = _json.loads(body).get("receive_id")
+        assert receive_id == "omt_topic_abc"
+        assert getattr(call_args, "receive_id_type", None) == "thread_id"
 
     @pytest.mark.asyncio
     async def test_create_uses_chat_id_when_no_thread(self):
         """When reply_to=None and metadata has no thread_id, message.create
         should use receive_id_type='chat_id' (original behavior)."""
+        from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
 
         mock_client = MagicMock()
@@ -252,10 +283,8 @@ class TestFeishuFallbackThreadRouting:
         )
         mock_client.im.v1.message.create = MagicMock(return_value=mock_create_response)
 
-        adapter = MagicMock(spec=FeishuAdapter)
+        adapter = FeishuAdapter(PlatformConfig())
         adapter._client = mock_client
-        adapter._build_create_message_body = FeishuAdapter._build_create_message_body
-        adapter._build_create_message_request = FeishuAdapter._build_create_message_request
         async def _run_blocking_passthrough(func, *args):
             return func(*args)
         adapter._run_blocking = _run_blocking_passthrough

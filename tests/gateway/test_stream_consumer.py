@@ -170,6 +170,205 @@ class TestEditMessageFinalizeSignature:
         )
 
 
+class TestStreamingPreview:
+    """Temporary stream-start previews should be replaced, not finalized."""
+
+    @pytest.mark.asyncio
+    async def test_preview_is_visible_then_replaced_by_real_delta(self):
+        adapter = MagicMock()
+        adapter.MAX_MESSAGE_LENGTH = 4096
+        adapter.REQUIRES_EDIT_FINALIZE = True
+        adapter.send = AsyncMock(return_value=SimpleNamespace(success=True, message_id="msg_1"))
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True, message_id="msg_1"))
+
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            StreamConsumerConfig(cursor=" ▉", edit_interval=999, buffer_threshold=999),
+        )
+        task = asyncio.create_task(consumer.run())
+        consumer.on_preview("思考中…\n\n用户消息：我没有看到流式输出样式。解决问题")
+        consumer.on_delta("已修复流式输出。")
+        consumer.finish()
+        await asyncio.wait_for(task, timeout=2)
+
+        adapter.send.assert_called_once()
+        preview_text = adapter.send.call_args.kwargs["content"]
+        assert "用户消息：我没有看到流式输出样式。解决问题" in preview_text
+
+        edited_texts = [call.kwargs["content"] for call in adapter.edit_message.call_args_list]
+        assert "已修复流式输出。" in edited_texts
+        assert all("我没有看到流式输出样式" not in text for text in edited_texts)
+        assert consumer.final_response_sent is True
+
+    @pytest.mark.asyncio
+    async def test_progress_lines_render_inside_same_stream_message(self):
+        adapter = MagicMock()
+        adapter.MAX_MESSAGE_LENGTH = 4096
+        adapter.send = AsyncMock(return_value=SimpleNamespace(success=True, message_id="msg_1"))
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True, message_id="msg_1"))
+
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            StreamConsumerConfig(cursor="", edit_interval=0, buffer_threshold=1),
+        )
+        task = asyncio.create_task(consumer.run())
+        consumer.on_progress('📚 skill_view: "browser-search"')
+        await asyncio.sleep(0.1)
+        consumer.on_delta("星巴克在线")
+        await asyncio.sleep(0.1)
+        consumer.finish()
+        await asyncio.wait_for(task, timeout=2)
+
+        adapter.send.assert_called_once()
+        visible_texts = [adapter.send.call_args.kwargs["content"]]
+        edited_texts = [call.kwargs["content"] for call in adapter.edit_message.call_args_list]
+        visible_texts.extend(edited_texts)
+        assert any("星巴克在线" in text for text in visible_texts)
+        assert any('📚 skill_view: "browser-search"' in text for text in visible_texts[:-1])
+        assert any("思考中" in text for text in visible_texts[:-1])
+        assert any("最近进度" in text for text in visible_texts[:-1])
+        assert any("\n回复\n星巴克在线" in text for text in visible_texts[:-1])
+        final_visible = visible_texts[-1]
+        assert final_visible == "星巴克在线"
+        assert '📚 skill_view: "browser-search"' not in final_visible
+        assert "思考中" not in final_visible
+        assert "最近进度" not in final_visible
+        assert "回复" not in final_visible
+        assert "\n---\n" not in final_visible
+        assert consumer.final_response_sent is True
+
+    @pytest.mark.asyncio
+    async def test_progress_lines_strip_code_fences_inside_stream_message(self):
+        adapter = MagicMock()
+        adapter.MAX_MESSAGE_LENGTH = 4096
+        adapter.send = AsyncMock(return_value=SimpleNamespace(success=True, message_id="msg_1"))
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True, message_id="msg_1"))
+
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            StreamConsumerConfig(cursor="", edit_interval=999, buffer_threshold=999),
+        )
+        task = asyncio.create_task(consumer.run())
+        consumer.on_progress("💻 terminal\n```\npython3 - <<'PY'\nprint('ok')\nPY\n```")
+        await asyncio.sleep(0.1)
+        consumer.on_delta("正文")
+        consumer.finish()
+        await asyncio.wait_for(task, timeout=2)
+
+        visible_texts = [adapter.send.call_args.kwargs["content"]]
+        visible_texts.extend(call.kwargs["content"] for call in adapter.edit_message.call_args_list)
+        progress_visible = visible_texts[0]
+        assert "```" not in progress_visible
+        assert "python3 - <<'PY'" in progress_visible
+        assert "\npython3 - <<'PY'" not in progress_visible
+        assert " · python3 - <<'PY'" in progress_visible
+        assert "思考中" in progress_visible
+        final_visible = visible_texts[-1]
+        assert "```" not in final_visible
+        assert "python3 - <<'PY'" not in final_visible
+        assert "💻 terminal" not in final_visible
+        assert final_visible == "正文"
+
+    @pytest.mark.asyncio
+    async def test_progress_lines_roll_to_recent_entries(self):
+        adapter = MagicMock()
+        adapter.MAX_MESSAGE_LENGTH = 4096
+        adapter.send = AsyncMock(return_value=SimpleNamespace(success=True, message_id="msg_1"))
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True, message_id="msg_1"))
+
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            StreamConsumerConfig(cursor="", edit_interval=999, buffer_threshold=999),
+        )
+        task = asyncio.create_task(consumer.run())
+        for i in range(12):
+            consumer.on_progress(f"tool-{i}")
+        await asyncio.sleep(0.1)
+        consumer.on_delta("正文")
+        consumer.finish()
+        await asyncio.wait_for(task, timeout=2)
+
+        progress_visible = adapter.send.call_args.kwargs["content"]
+        assert "思考中" in progress_visible
+        assert "tool-0" not in progress_visible
+        assert "tool-5" not in progress_visible
+        assert "tool-6" in progress_visible
+        assert "tool-11" in progress_visible
+
+        final_visible = adapter.edit_message.call_args_list[-1].kwargs["content"]
+        assert final_visible == "正文"
+        assert "tool-" not in final_visible
+        assert "思考中" not in final_visible
+        assert "最近进度" not in final_visible
+
+    @pytest.mark.asyncio
+    async def test_progress_status_line_is_stable_across_body_updates(self):
+        adapter = MagicMock()
+        adapter.MAX_MESSAGE_LENGTH = 4096
+        adapter.send = AsyncMock(return_value=SimpleNamespace(success=True, message_id="msg_1"))
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True, message_id="msg_1"))
+
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            StreamConsumerConfig(cursor="", edit_interval=0, buffer_threshold=1),
+        )
+        task = asyncio.create_task(consumer.run())
+        consumer.on_progress('📚 skill_view: "browser-search"')
+        await asyncio.sleep(0.1)
+        consumer.on_delta("第一段")
+        await asyncio.sleep(0.1)
+        consumer.on_delta("，第二段")
+        await asyncio.sleep(0.1)
+        consumer.on_delta("，第三段")
+        consumer.finish()
+        await asyncio.wait_for(task, timeout=2)
+
+        visible_texts = [adapter.send.call_args.kwargs["content"]]
+        visible_texts.extend(call.kwargs["content"] for call in adapter.edit_message.call_args_list)
+        progress_frames = [
+            text for text in visible_texts[:-1]
+            if '📚 skill_view: "browser-search"' in text
+        ]
+        assert len(progress_frames) >= 2
+        assert {frame.splitlines()[0] for frame in progress_frames} == {"思考中"}
+        assert all("思考中." not in frame for frame in progress_frames)
+        assert visible_texts[-1] == "第一段，第二段，第三段"
+
+    @pytest.mark.asyncio
+    async def test_final_metadata_is_available_on_finalize_edit(self):
+        adapter = MagicMock()
+        adapter.MAX_MESSAGE_LENGTH = 4096
+        adapter.REQUIRES_EDIT_FINALIZE = True
+        adapter.send = AsyncMock(return_value=SimpleNamespace(success=True, message_id="msg_1"))
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True, message_id="msg_1"))
+
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            StreamConsumerConfig(cursor="", edit_interval=999, buffer_threshold=999),
+            metadata={"expect_edits": True},
+        )
+        task = asyncio.create_task(consumer.run())
+        consumer.on_delta("星巴克在线")
+        consumer.set_final_metadata(feishu_stream_footer="已完成 · 耗时 8.3s")
+        consumer.finish()
+        await asyncio.wait_for(task, timeout=2)
+
+        final_edits = [
+            call.kwargs
+            for call in adapter.edit_message.call_args_list
+            if call.kwargs.get("finalize")
+        ]
+        assert final_edits
+        assert final_edits[-1]["metadata"]["feishu_stream_footer"] == "已完成 · 耗时 8.3s"
+        assert consumer.final_response_sent is True
+
+
 class TestSendOrEditMediaStripping:
     """Verify _send_or_edit strips MEDIA: before sending to the platform."""
 
