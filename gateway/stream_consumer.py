@@ -39,6 +39,13 @@ from gateway.response_filters import (
 
 logger = logging.getLogger("gateway.stream_consumer")
 
+_STREAM_PROGRESS_FENCE_LINE_RE = re.compile(r"^```[^\n`]*\s*$", re.MULTILINE)
+_PROGRESS_STATUS_LINE = "思考中"
+_PROGRESS_SECTION_TITLE = "最近进度"
+_ANSWER_SECTION_TITLE = "回复"
+_PROGRESS_ANIMATION_INTERVAL = 2.0
+_PROGRESS_EVENT_MAX_CHARS = 220
+
 # Sentinel to signal the stream is complete
 _DONE = object()
 
@@ -49,6 +56,15 @@ _NEW_SEGMENT = object()
 # Queue marker for a completed assistant commentary message emitted between
 # API/tool iterations (for example: "I'll inspect the repo first.").
 _COMMENTARY = object()
+
+# Queue marker for a temporary streaming preview. Unlike normal deltas this is
+# rendered into the editable stream bubble without being appended to the final
+# accumulated assistant text; the first real model delta replaces it in place.
+_PREVIEW = object()
+
+# Queue marker for tool/status lines rendered inside the same editable stream
+# message without becoming part of the final assistant answer.
+_PROGRESS = object()
 
 
 @dataclass
@@ -213,6 +229,9 @@ class GatewayStreamConsumer:
         # this response and route through edit-based for graceful degradation.
         self._draft_failures = 0
         self._before_finalize_notified = False
+        self._progress_lines: list[str] = []
+        self._progress_max_lines = 6
+        self._progress_max_chars = 1200
 
     def _metadata_for_send(
         self,
@@ -321,6 +340,37 @@ class GatewayStreamConsumer:
         if text:
             self._queue.put((_COMMENTARY, text))
 
+    def on_preview(self, text: str) -> None:
+        """Queue a temporary editable stream preview.
+
+        The preview is user-visible immediately (for example: "收到 X，正在
+        处理…"), but it is not part of ``_accumulated`` and therefore never
+        leaks into the final assistant answer. The first real streamed delta
+        edits the same message in place, replacing the preview.
+        """
+        if text:
+            self._queue.put((_PREVIEW, text))
+
+    def on_progress(self, text: str, *, replace_last: bool = False) -> None:
+        """Queue a tool/status line for the current editable stream message."""
+        if text:
+            self._queue.put((_PROGRESS, text, bool(replace_last)))
+
+    def set_final_metadata(self, **metadata: Any) -> None:
+        """Merge metadata that is only known after the agent run finishes.
+
+        The Feishu CardKit adapter uses this for the final streaming-card
+        footer: the initial card is created before token counts and elapsed
+        time are known, but the final ``edit_message(finalize=True)`` can still
+        receive them through the shared metadata dict.
+        """
+        clean = {k: v for k, v in metadata.items() if v is not None}
+        if not clean:
+            return
+        if self.metadata is None:
+            self.metadata = {}
+        self.metadata.update(clean)
+
     def _notify_new_message(self) -> None:
         """Fire the on_new_message callback, swallowing any errors."""
         cb = self._on_new_message
@@ -357,6 +407,69 @@ class GatewayStreamConsumer:
         if self._use_draft_streaming:
             type(self)._draft_id_counter += 1
             self._draft_id = type(self)._draft_id_counter
+
+    def _update_progress_lines(self, text: str, *, replace_last: bool = False) -> None:
+        line = self._sanitize_progress_text(text)
+        if not line:
+            return
+        if replace_last and self._progress_lines:
+            self._progress_lines[-1] = line
+        else:
+            self._progress_lines.append(line)
+        if len(self._progress_lines) > self._progress_max_lines:
+            self._progress_lines = self._progress_lines[-self._progress_max_lines:]
+        while (
+            len(self._progress_lines) > 1
+            and sum(len(item) for item in self._progress_lines) > self._progress_max_chars
+        ):
+            self._progress_lines.pop(0)
+
+    def _progress_text(self, *, include_animation: bool = False) -> str:
+        if not self._progress_lines:
+            return ""
+        progress = "\n".join(f"• {line}" for line in self._progress_lines)
+        if not include_animation:
+            return progress
+        return f"{_PROGRESS_STATUS_LINE}\n\n{_PROGRESS_SECTION_TITLE}\n{progress}"
+
+    @staticmethod
+    def _sanitize_progress_text(text: str) -> str:
+        """Render tool/status progress as plain lines inside stream cards.
+
+        Gateway progress is a compact event log, not a rich answer body.  Some
+        platforms advertise markdown code-block support, which historically made
+        terminal previews appear as fenced blocks inside Feishu streaming cards.
+        The stream card should keep the command text but not the fence chrome.
+        """
+        line = str(text or "").replace("\r\n", "\n").strip()
+        if "```" in line:
+            line = _STREAM_PROGRESS_FENCE_LINE_RE.sub("", line)
+            line = re.sub(r"\n{3,}", "\n\n", line)
+        line = re.sub(r"[ \t]*\n+[ \t]*", " · ", line)
+        line = re.sub(r"\s{2,}", " ", line).strip()
+        if len(line) > _PROGRESS_EVENT_MAX_CHARS:
+            line = line[: _PROGRESS_EVENT_MAX_CHARS - 1].rstrip() + "…"
+        return line.strip()
+
+    def _render_display_text(
+        self,
+        answer_text: str,
+        *,
+        include_cursor: bool,
+        include_progress: bool = True,
+    ) -> str:
+        answer = answer_text or ""
+        progress = self._progress_text(include_animation=True) if include_progress else ""
+        if progress:
+            if answer.strip():
+                rendered = f"{progress.rstrip()}\n\n{_ANSWER_SECTION_TITLE}\n{answer.lstrip()}"
+            else:
+                rendered = progress
+        else:
+            rendered = answer
+        if include_cursor and self.cfg.cursor:
+            rendered += self.cfg.cursor
+        return rendered
 
     def on_delta(self, text: str) -> None:
         """Thread-safe callback — called from the agent's worker thread.
@@ -572,6 +685,8 @@ class GatewayStreamConsumer:
                 got_done = False
                 got_segment_break = False
                 commentary_text = None
+                preview_text = None
+                progress_changed = False
                 while True:
                     try:
                         item = self._queue.get_nowait()
@@ -584,6 +699,13 @@ class GatewayStreamConsumer:
                         if isinstance(item, tuple) and len(item) == 2 and item[0] is _COMMENTARY:
                             commentary_text = item[1]
                             break
+                        if isinstance(item, tuple) and len(item) == 2 and item[0] is _PREVIEW:
+                            preview_text = item[1]
+                            break
+                        if isinstance(item, tuple) and len(item) == 3 and item[0] is _PROGRESS:
+                            self._update_progress_lines(item[1], replace_last=bool(item[2]))
+                            progress_changed = True
+                            continue
                         self._filter_and_accumulate(item)
                     except queue.Empty:
                         break
@@ -617,6 +739,8 @@ class GatewayStreamConsumer:
                     got_done
                     or got_segment_break
                     or commentary_text is not None
+                    or preview_text is not None
+                    or progress_changed
                 )
                 if not self.cfg.buffer_only:
                     should_edit = should_edit or (
@@ -627,6 +751,11 @@ class GatewayStreamConsumer:
                         # every N visible characters"), not a platform-limit
                         # check. _len_fn is reserved for overflow detection.
                         or len(self._accumulated) >= self.cfg.buffer_threshold
+                    )
+                    should_edit = should_edit or (
+                        self._progress_lines
+                        and not got_done
+                        and elapsed >= _PROGRESS_ANIMATION_INTERVAL
                     )
 
                 current_update_visible = False
@@ -648,11 +777,25 @@ class GatewayStreamConsumer:
                     )
                 ):
                     should_edit = False
-                if should_edit and self._accumulated:
+
+                if preview_text is not None and not self._accumulated:
+                    display_text = str(preview_text or "")
+                    if self.cfg.cursor and self.cfg.cursor not in display_text:
+                        display_text += self.cfg.cursor
+                    current_update_visible = await self._send_or_edit(
+                        display_text,
+                        finalize=False,
+                        is_turn_final=False,
+                    )
+                    self._last_edit_time = time.monotonic()
+
+                if should_edit and (self._accumulated or self._progress_lines):
                     # Split overflow: if accumulated text exceeds the platform
                     # limit, split into properly sized chunks.
                     if (
-                        _len_fn(self._accumulated) > _safe_limit
+                        self._accumulated
+                        and not self._progress_lines
+                        and _len_fn(self._accumulated) > _safe_limit
                         and self._message_id is None
                     ):
                         # No existing message to edit (first message or after a
@@ -694,7 +837,9 @@ class GatewayStreamConsumer:
                     # Existing message: edit it with the first chunk, then
                     # start a new message for the overflow remainder.
                     while (
-                        _len_fn(self._accumulated) > _safe_limit
+                        self._accumulated
+                        and not self._progress_lines
+                        and _len_fn(self._accumulated) > _safe_limit
                         and self._message_id is not None
                         and self._edit_supported
                     ):
@@ -729,9 +874,11 @@ class GatewayStreamConsumer:
                         self._message_id = None
                         self._last_sent_text = ""
 
-                    display_text = self._accumulated
-                    if not got_done and not got_segment_break and commentary_text is None:
-                        display_text += self.cfg.cursor
+                    display_text = self._render_display_text(
+                        self._accumulated,
+                        include_cursor=not got_done and not got_segment_break and commentary_text is None,
+                        include_progress=not got_done,
+                    )
 
                     # Segment break: finalize the current message so platforms
                     # that need explicit closure (e.g. DingTalk AI Cards) don't
@@ -790,7 +937,8 @@ class GatewayStreamConsumer:
                             # visible update this tick) OR the adapter needs
                             # explicit finalize=True to close the stream.
                             self._final_response_sent = await self._send_or_edit(
-                                self._accumulated, finalize=True,
+                                self._accumulated,
+                                finalize=True,
                             )
                             if self._final_response_sent:
                                 self._final_content_delivered = True
@@ -804,7 +952,9 @@ class GatewayStreamConsumer:
                                 # not duplicate the visible prefix.
                                 await self._send_fallback_final(self._accumulated)
                         elif not self._already_sent:
-                            self._final_response_sent = await self._send_or_edit(self._accumulated)
+                            self._final_response_sent = await self._send_or_edit(
+                                self._accumulated
+                            )
                             if self._final_response_sent:
                                 self._final_content_delivered = True
                     return
@@ -1634,6 +1784,9 @@ class GatewayStreamConsumer:
                     )
                     if result.success:
                         self._already_sent = True
+                        if finalize and is_turn_final:
+                            self._final_response_sent = True
+                            self._final_content_delivered = True
                         # Record any continuation fragments an oversized edit
                         # split off, so fresh-final can clean them all up.
                         self._track_preview_ids_from_result(result)

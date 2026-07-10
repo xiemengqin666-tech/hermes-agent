@@ -8,7 +8,7 @@ Supports:
 - Gateway allowlist integration via FEISHU_ALLOWED_USERS
 - Persistent dedup state across restarts
 - Per-chat serial message processing (matches openclaw createChatQueue)
-- Processing status reactions: Typing while working, removed on success,
+- Processing status reactions: optional start reaction, removed on success,
   swapped for CrossMark on failure
 - Reaction events routed as synthetic text events (matches openclaw)
 - Interactive card button-click events routed as synthetic COMMAND events
@@ -88,6 +88,17 @@ except ImportError:
 try:
     import lark_oapi as lark
     from lark_oapi.api.application.v6 import GetApplicationRequest
+    from lark_oapi.api.cardkit.v1 import (
+        Card,
+        ContentCardElementRequest,
+        ContentCardElementRequestBody,
+        CreateCardRequest,
+        CreateCardRequestBody,
+        SettingsCardRequest,
+        SettingsCardRequestBody,
+        UpdateCardRequest,
+        UpdateCardRequestBody,
+    )
     from lark_oapi.api.im.v1 import (
         CreateFileRequest,
         CreateFileRequestBody,
@@ -147,6 +158,14 @@ from utils import atomic_json_write, env_float, env_int
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_token(value: object) -> str:
+    """Return a short, non-secret identifier for operational logs."""
+    text = str(value or "")
+    if len(text) <= 12:
+        return text
+    return f"{text[:8]}...{text[-4:]}"
+
 # ---------------------------------------------------------------------------
 # Regex patterns
 # ---------------------------------------------------------------------------
@@ -201,6 +220,13 @@ _DEFAULT_DEDUP_CACHE_SIZE = 2048
 _DEFAULT_WEBHOOK_HOST = "127.0.0.1"
 _DEFAULT_WEBHOOK_PORT = 8765
 _DEFAULT_WEBHOOK_PATH = "/feishu/webhook"
+_FEISHU_STREAM_CARD_ELEMENT_ID = "streaming_content"
+_FEISHU_STREAM_CARD_PROGRESS_ELEMENT_ID = "streaming_progress"
+_FEISHU_STREAM_CARD_PROGRESS_TITLE = "最近进度"
+_FEISHU_STREAM_CARD_ANSWER_TITLE = "回复"
+_FEISHU_STREAM_CARD_EMPTY_MARKDOWN = "\u200b"
+_FEISHU_STREAM_CARD_TRACK_SIZE = 512
+_FEISHU_STREAM_CARD_CODE_FENCE_RE = re.compile(r"^```[^\n`]*\s*$", re.MULTILINE)
 # ---------------------------------------------------------------------------
 # TTL, rate-limit and webhook security constants
 # ---------------------------------------------------------------------------
@@ -244,12 +270,15 @@ async def _read_limited_feishu_webhook_body(request: Any, max_bytes: int) -> byt
 _FEISHU_BOT_MSG_TRACK_SIZE = 512                   # LRU size for tracking sent message IDs
 _FEISHU_REPLY_FALLBACK_CODES = frozenset({230011, 231003})  # reply target withdrawn/missing → create fallback
 
-# Feishu reactions render as prominent badges, unlike Discord/Telegram's
-# small footer emoji — a success badge on every message would add noise, so
-# we only mark start (Typing) and failure (CrossMark); the reply itself is
-# the success signal.
+# Feishu reactions are the durable task-state signal in chat: keep Typing while
+# a turn is running, then replace it with a terminal marker after completion.
+_FEISHU_REACTION_IN_PROGRESS_ENV = "FEISHU_REACTION_IN_PROGRESS"
+_FEISHU_REACTION_SUCCESS_ENV = "FEISHU_REACTION_SUCCESS"
+_FEISHU_REACTION_CANCELLED_ENV = "FEISHU_REACTION_CANCELLED"
 _FEISHU_REACTION_IN_PROGRESS = "Typing"
+_FEISHU_REACTION_SUCCESS = "DONE"
 _FEISHU_REACTION_FAILURE = "CrossMark"
+_FEISHU_REACTION_CANCELLED = "BOMB"
 # Bound on the (message_id → reaction_id) handle cache. Happy-path entries
 # drain on completion; the cap is a safeguard against unbounded growth from
 # delete-failures, not a capacity plan.
@@ -1370,6 +1399,17 @@ def check_feishu_requirements() -> bool:
     def _import():
         import lark_oapi as lark
         from lark_oapi.api.application.v6 import GetApplicationRequest
+        from lark_oapi.api.cardkit.v1 import (
+            Card,
+            ContentCardElementRequest,
+            ContentCardElementRequestBody,
+            CreateCardRequest,
+            CreateCardRequestBody,
+            SettingsCardRequest,
+            SettingsCardRequestBody,
+            UpdateCardRequest,
+            UpdateCardRequestBody,
+        )
         from lark_oapi.api.im.v1 import (
             CreateFileRequest, CreateFileRequestBody,
             CreateImageRequest, CreateImageRequestBody,
@@ -1390,6 +1430,15 @@ def check_feishu_requirements() -> bool:
         return {
             "lark": lark,
             "GetApplicationRequest": GetApplicationRequest,
+            "Card": Card,
+            "ContentCardElementRequest": ContentCardElementRequest,
+            "ContentCardElementRequestBody": ContentCardElementRequestBody,
+            "CreateCardRequest": CreateCardRequest,
+            "CreateCardRequestBody": CreateCardRequestBody,
+            "SettingsCardRequest": SettingsCardRequest,
+            "SettingsCardRequestBody": SettingsCardRequestBody,
+            "UpdateCardRequest": UpdateCardRequest,
+            "UpdateCardRequestBody": UpdateCardRequestBody,
             "CreateFileRequest": CreateFileRequest,
             "CreateFileRequestBody": CreateFileRequestBody,
             "CreateImageRequest": CreateImageRequest,
@@ -1425,6 +1474,7 @@ class FeishuAdapter(BasePlatformAdapter):
 
     supports_code_blocks = True  # Feishu renders fenced code blocks
     splits_long_messages = True  # send() chunks via truncate_message(MAX_MESSAGE_LENGTH)
+    REQUIRES_EDIT_FINALIZE = True
 
     MAX_MESSAGE_LENGTH = 8000
     # Max distinct chat IDs retained in _chat_locks before LRU eviction kicks in.
@@ -1479,6 +1529,8 @@ class FeishuAdapter(BasePlatformAdapter):
         self._chat_locks: "collections.OrderedDict[str, asyncio.Lock]" = collections.OrderedDict()  # chat_id → lock (per-chat serial processing, LRU-bounded)
         self._sent_message_ids_to_chat: Dict[str, str] = {}  # message_id → chat_id (for reaction routing)
         self._sent_message_id_order: List[str] = []  # LRU order for _sent_message_ids_to_chat
+        self._outbound_message_types: "OrderedDict[str, str]" = OrderedDict()  # message_id → msg_type for stable edits
+        self._stream_card_states: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         self._chat_info_cache: Dict[str, Dict[str, Any]] = {}
         self._message_text_cache: "OrderedDict[str, Optional[str]]" = OrderedDict()
         self._app_lock_identity: Optional[str] = None
@@ -1884,6 +1936,428 @@ class FeishuAdapter(BasePlatformAdapter):
     # Outbound — send / edit / send_image / send_voice / …
     # =========================================================================
 
+    def _remember_outbound_message_type(self, message_id: Any, msg_type: str) -> None:
+        message_id = str(message_id or "").strip()
+        msg_type = str(msg_type or "").strip()
+        if not message_id or not msg_type:
+            return
+        self._outbound_message_types[message_id] = msg_type
+        self._outbound_message_types.move_to_end(message_id)
+        while len(self._outbound_message_types) > _FEISHU_BOT_MSG_TRACK_SIZE:
+            self._outbound_message_types.popitem(last=False)
+
+    def _remember_stream_card_state(self, message_id: str, *, card_id: str, content: str = "") -> None:
+        message_id = str(message_id or "").strip()
+        card_id = str(card_id or "").strip()
+        if not message_id or not card_id:
+            return
+        progress, answer = self._stream_card_live_sections(content)
+        self._stream_card_states[message_id] = {
+            "card_id": card_id,
+            "sequence": 0,
+            "last_progress": progress,
+            "last_answer": answer,
+        }
+        self._stream_card_states.move_to_end(message_id)
+        while len(self._stream_card_states) > _FEISHU_STREAM_CARD_TRACK_SIZE:
+            self._stream_card_states.popitem(last=False)
+
+    @staticmethod
+    def _cardkit_available() -> bool:
+        return all(
+            name in globals()
+            for name in (
+                "Card",
+                "ContentCardElementRequest",
+                "ContentCardElementRequestBody",
+                "CreateCardRequest",
+                "CreateCardRequestBody",
+                "SettingsCardRequest",
+                "SettingsCardRequestBody",
+                "UpdateCardRequest",
+                "UpdateCardRequestBody",
+            )
+        )
+
+    @staticmethod
+    def _stream_footer_from_metadata(metadata: Optional[Dict[str, Any]]) -> str:
+        if not isinstance(metadata, dict):
+            return ""
+        footer = metadata.get("feishu_stream_footer") or metadata.get("stream_footer")
+        if footer is None:
+            return ""
+        return str(footer).replace("\n", " ").strip()
+
+    @staticmethod
+    def _sanitize_stream_card_content(content: str) -> str:
+        text = str(content or "").replace("\r\n", "\n")
+        if "```" in text:
+            text = _FEISHU_STREAM_CARD_CODE_FENCE_RE.sub("", text)
+            text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    @staticmethod
+    def _stream_card_live_content(content: str) -> str:
+        text = FeishuAdapter._sanitize_stream_card_content(content)
+        lines = text.splitlines()
+        if lines and lines[0].strip() == "思考中":
+            lines = lines[1:]
+            while lines and not lines[0].strip():
+                lines = lines[1:]
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _stream_card_live_sections(content: str) -> tuple[str, str]:
+        text = FeishuAdapter._stream_card_live_content(content)
+        if not text:
+            return "", ""
+        lines = text.splitlines()
+        answer_index = next(
+            (index for index, line in enumerate(lines) if line.strip() == _FEISHU_STREAM_CARD_ANSWER_TITLE),
+            None,
+        )
+        if answer_index is not None:
+            progress = "\n".join(lines[:answer_index]).strip()
+            answer = "\n".join(lines[answer_index + 1:]).strip()
+            return progress, answer
+        first_line = lines[0].strip() if lines else ""
+        if first_line == _FEISHU_STREAM_CARD_PROGRESS_TITLE or first_line.startswith("• "):
+            return text.strip(), ""
+        return "", text.strip()
+
+    @staticmethod
+    def _stream_card_element_content(content: str) -> str:
+        text = str(content or "")
+        return text if text else _FEISHU_STREAM_CARD_EMPTY_MARKDOWN
+
+    @staticmethod
+    def _stream_card_final_content(content: str) -> str:
+        text = FeishuAdapter._sanitize_stream_card_content(content)
+        if not text:
+            return ""
+        lines = text.splitlines()
+        if lines and lines[0].strip() == "思考中":
+            marker = f"\n{_FEISHU_STREAM_CARD_ANSWER_TITLE}\n"
+            if marker in text:
+                return text.split(marker, 1)[1].strip()
+            parts = [part.strip() for part in text.split("\n\n") if part.strip()]
+            if len(parts) >= 2:
+                return parts[-1]
+        return text
+
+    @staticmethod
+    def _build_stream_card(
+        content: str = "",
+        *,
+        streaming: bool = True,
+        footer: str = "",
+    ) -> Dict[str, Any]:
+        summary = "Hermes"
+        content = FeishuAdapter._sanitize_stream_card_content(content)
+        if streaming:
+            progress, answer = FeishuAdapter._stream_card_live_sections(content)
+        else:
+            content = FeishuAdapter._stream_card_final_content(content)
+        elements: list[Dict[str, Any]] = []
+        if streaming:
+            elements.append(
+                {
+                    "tag": "markdown",
+                    "content": "**思考中**",
+                    "text_align": "left",
+                    "text_size": "normal_v2",
+                    "margin": "0px 0px 6px 0px",
+                }
+            )
+            elements.append(
+                {
+                    "tag": "markdown",
+                    "content": FeishuAdapter._stream_card_element_content(progress),
+                    "text_align": "left",
+                    "text_size": "notation",
+                    "margin": "0px 0px 8px 0px",
+                    "element_id": _FEISHU_STREAM_CARD_PROGRESS_ELEMENT_ID,
+                }
+            )
+            elements.append(
+                {
+                    "tag": "markdown",
+                    "content": FeishuAdapter._stream_card_element_content(answer),
+                    "text_align": "left",
+                    "text_size": "normal_v2",
+                    "margin": "0px 0px 0px 0px",
+                    "element_id": _FEISHU_STREAM_CARD_ELEMENT_ID,
+                }
+            )
+        else:
+            elements.append(
+                {
+                    "tag": "markdown",
+                    "content": content or "",
+                    "text_align": "left",
+                    "text_size": "normal_v2",
+                    "margin": "0px 0px 0px 0px",
+                    "element_id": _FEISHU_STREAM_CARD_ELEMENT_ID,
+                }
+            )
+        footer = str(footer or "").strip()
+        if footer:
+            elements.append(
+                {
+                    "tag": "markdown",
+                    "content": footer,
+                    "i18n_content": {"zh_cn": footer, "en_us": footer},
+                    "text_size": "notation",
+                    "margin": "8px 0px 0px 0px",
+                }
+            )
+        return {
+            "schema": "2.0",
+            "config": {
+                "streaming_mode": streaming,
+                "locales": ["zh_cn", "en_us"],
+                "summary": {
+                    "content": summary,
+                    "i18n_content": {"zh_cn": summary, "en_us": summary},
+                },
+            },
+            "body": {
+                "elements": elements,
+            },
+        }
+
+    @staticmethod
+    def _should_use_cardkit_stream(metadata: Optional[Dict[str, Any]], content: str) -> bool:
+        if os.getenv("HERMES_FEISHU_CARDKIT_STREAMING", "true").strip().lower() in {"0", "false", "off", "no"}:
+            return False
+        if not metadata or not metadata.get("expect_edits"):
+            return False
+        text = str(content or "").strip()
+        if not text:
+            return False
+        return "MEDIA:" not in text and "[[audio_as_voice]]" not in text
+
+    async def _create_cardkit_card(self, content: str) -> SendResult:
+        if not self._client or not self._cardkit_available():
+            return SendResult(success=False, error="CardKit unavailable")
+        card = self._build_stream_card(content, streaming=True)
+        body = (
+            CreateCardRequestBody.builder()
+            .type("card_json")
+            .data(json.dumps(card, ensure_ascii=False))
+            .build()
+        )
+        request = CreateCardRequest.builder().request_body(body).build()
+        try:
+            response = await asyncio.to_thread(self._client.cardkit.v1.card.create, request)
+        except Exception as exc:
+            logger.warning("[Feishu] CardKit card.create failed: %s", exc)
+            return SendResult(success=False, error=str(exc))
+        if not self._response_succeeded(response):
+            return self._response_error_result(response, default_message="card.create failed")
+        card_id = self._extract_response_field(response, "card_id")
+        if not card_id:
+            return SendResult(success=False, error="card.create missing card_id", raw_response=response)
+        logger.info("[Feishu] CardKit stream card created card_id=%s", _safe_token(card_id))
+        return SendResult(success=True, message_id=str(card_id), raw_response=response)
+
+    async def _send_cardkit_stream_message(
+        self,
+        *,
+        chat_id: str,
+        content: str,
+        reply_to: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+    ) -> SendResult:
+        card_result = await self._create_cardkit_card(content)
+        if not card_result.success or not card_result.message_id:
+            return card_result
+        card_id = str(card_result.message_id)
+        payload = json.dumps({"type": "card", "data": {"card_id": card_id}}, ensure_ascii=False)
+        try:
+            response = await self._feishu_send_with_retry(
+                chat_id=chat_id,
+                msg_type="interactive",
+                payload=payload,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+        except Exception as exc:
+            logger.warning("[Feishu] CardKit card send failed: %s", exc)
+            return SendResult(success=False, error=str(exc))
+        result = self._finalize_send_result(response, "card send failed")
+        if result.success and result.message_id:
+            self._remember_outbound_message_type(result.message_id, "interactive")
+            self._remember_stream_card_state(str(result.message_id), card_id=card_id, content=content)
+            logger.info(
+                "[Feishu] CardKit stream message sent message_id=%s card_id=%s",
+                _safe_token(result.message_id),
+                _safe_token(card_id),
+            )
+        return result
+
+    async def _update_cardkit_element_content(
+        self,
+        *,
+        state: Dict[str, Any],
+        card_id: str,
+        element_id: str,
+        content: str,
+    ) -> SendResult:
+        state["sequence"] = int(state.get("sequence") or 0) + 1
+        body = (
+            ContentCardElementRequestBody.builder()
+            .content(self._stream_card_element_content(content))
+            .sequence(int(state["sequence"]))
+            .build()
+        )
+        request = (
+            ContentCardElementRequest.builder()
+            .card_id(card_id)
+            .element_id(element_id)
+            .request_body(body)
+            .build()
+        )
+        try:
+            response = await asyncio.to_thread(self._client.cardkit.v1.card_element.content, request)
+        except Exception as exc:
+            logger.warning("[Feishu] CardKit cardElement.content failed: %s", exc)
+            return SendResult(success=False, error=str(exc))
+        if not self._response_succeeded(response):
+            return self._response_error_result(response, default_message="cardElement.content failed")
+        return SendResult(success=True, raw_response=response)
+
+    async def _stream_cardkit_content(
+        self,
+        *,
+        state: Dict[str, Any],
+        content: str,
+    ) -> SendResult:
+        card_id = str(state.get("card_id") or "")
+        if not card_id:
+            return SendResult(success=False, error="missing CardKit card_id")
+        progress, answer = self._stream_card_live_sections(content)
+        raw_progress = state.get("last_progress", "")
+        raw_answer = state.get("last_answer", "")
+        last_progress = raw_progress if isinstance(raw_progress, str) else str(raw_progress or "")
+        last_answer = raw_answer if isinstance(raw_answer, str) else str(raw_answer or "")
+        updated = False
+
+        if progress != last_progress:
+            result = await self._update_cardkit_element_content(
+                state=state,
+                card_id=card_id,
+                element_id=_FEISHU_STREAM_CARD_PROGRESS_ELEMENT_ID,
+                content=progress,
+            )
+            if not result.success:
+                return result
+            state["last_progress"] = progress
+            updated = True
+
+        if answer != last_answer:
+            result = await self._update_cardkit_element_content(
+                state=state,
+                card_id=card_id,
+                element_id=_FEISHU_STREAM_CARD_ELEMENT_ID,
+                content=answer,
+            )
+            if not result.success:
+                return result
+            state["last_answer"] = answer
+            updated = True
+
+        if not updated:
+            return SendResult(success=True)
+        logger.info(
+            "[Feishu] CardKit stream updated card_id=%s progress_chars=%d answer_chars=%d",
+            _safe_token(card_id),
+            len(progress),
+            len(answer),
+        )
+        return SendResult(success=True)
+
+    async def _finalize_cardkit_stream(
+        self,
+        *,
+        state: Dict[str, Any],
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        card_id = str(state.get("card_id") or "")
+        if not card_id:
+            return SendResult(success=False, error="missing CardKit card_id")
+        state["sequence"] = int(state.get("sequence") or 0) + 1
+        card_obj = (
+            Card.builder()
+            .type("card_json")
+            .data(json.dumps(
+                self._build_stream_card(
+                    content,
+                    streaming=False,
+                    footer=self._stream_footer_from_metadata(metadata),
+                ),
+                ensure_ascii=False,
+            ))
+            .build()
+        )
+        update_body = (
+            UpdateCardRequestBody.builder()
+            .card(card_obj)
+            .sequence(int(state["sequence"]))
+            .build()
+        )
+        update_request = (
+            UpdateCardRequest.builder()
+            .card_id(card_id)
+            .request_body(update_body)
+            .build()
+        )
+        try:
+            update_response = await asyncio.to_thread(self._client.cardkit.v1.card.update, update_request)
+        except Exception as exc:
+            logger.warning("[Feishu] CardKit card.update failed: %s", exc)
+            return SendResult(success=False, error=str(exc))
+        if not self._response_succeeded(update_response):
+            return self._response_error_result(update_response, default_message="card.update failed")
+
+        state["sequence"] = int(state.get("sequence") or 0) + 1
+        settings_body = (
+            SettingsCardRequestBody.builder()
+            .settings(json.dumps({"streaming_mode": False}, ensure_ascii=False))
+            .sequence(int(state["sequence"]))
+            .build()
+        )
+        settings_request = (
+            SettingsCardRequest.builder()
+            .card_id(card_id)
+            .request_body(settings_body)
+            .build()
+        )
+        try:
+            settings_response = await asyncio.to_thread(self._client.cardkit.v1.card.settings, settings_request)
+        except Exception as exc:
+            logger.warning("[Feishu] CardKit card.settings failed: %s", exc)
+            return SendResult(success=False, error=str(exc))
+        if not self._response_succeeded(settings_response):
+            return self._response_error_result(settings_response, default_message="card.settings failed")
+        logger.info(
+            "[Feishu] CardKit stream finalized card_id=%s content_chars=%d footer=%s",
+            _safe_token(card_id),
+            len(str(content or "")),
+            "yes" if self._stream_footer_from_metadata(metadata) else "no",
+        )
+        return SendResult(success=True, raw_response=settings_response)
+
+    def _outbound_payload_for_edit(self, message_id: str, content: str) -> tuple[str, str]:
+        msg_type, payload = self._build_outbound_payload(content)
+        original_msg_type = self._outbound_message_types.get(str(message_id or ""))
+        if original_msg_type == "text" and msg_type != "text":
+            return "text", json.dumps({"text": content}, ensure_ascii=False)
+        if original_msg_type == "post" and msg_type != "post":
+            return "post", _build_markdown_post_payload(content)
+        return msg_type, payload
+
     async def send(
         self,
         chat_id: str,
@@ -1896,12 +2370,24 @@ class FeishuAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
 
         formatted = self.format_message(content)
+        if self._should_use_cardkit_stream(metadata, formatted):
+            card_result = await self._send_cardkit_stream_message(
+                chat_id=chat_id,
+                content=formatted,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+            if card_result.success:
+                return card_result
+            logger.warning("[Feishu] CardKit streaming send failed; falling back to normal message: %s", card_result.error)
+
         chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
         last_response = None
 
         try:
             for chunk in chunks:
                 msg_type, payload = self._build_outbound_payload(chunk)
+                sent_msg_type = msg_type
                 try:
                     response = await self._feishu_send_with_retry(
                         chat_id=chat_id,
@@ -1921,6 +2407,7 @@ class FeishuAdapter(BasePlatformAdapter):
                         reply_to=reply_to,
                         metadata=metadata,
                     )
+                    sent_msg_type = "text"
                 if (
                     msg_type == "post"
                     and not self._response_succeeded(response)
@@ -1933,6 +2420,12 @@ class FeishuAdapter(BasePlatformAdapter):
                         payload=json.dumps({"text": _strip_markdown_to_plain_text(chunk)}, ensure_ascii=False),
                         reply_to=reply_to,
                         metadata=metadata,
+                    )
+                    sent_msg_type = "text"
+                if self._response_succeeded(response):
+                    self._remember_outbound_message_type(
+                        self._extract_response_field(response, "message_id"),
+                        sent_msg_type,
                     )
                 last_response = response
 
@@ -1948,14 +2441,33 @@ class FeishuAdapter(BasePlatformAdapter):
         content: str,
         *,
         finalize: bool = False,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Edit a previously sent Feishu text/post message."""
         if not self._client:
             return SendResult(success=False, error="Not connected")
 
         content = self.format_message(content)
+        stream_state = self._stream_card_states.get(str(message_id or ""))
+        if stream_state:
+            self._stream_card_states.move_to_end(str(message_id or ""))
+            if finalize:
+                result = await self._finalize_cardkit_stream(
+                    state=stream_state,
+                    content=content,
+                    metadata=metadata,
+                )
+                if result.success:
+                    result.message_id = message_id
+                    self._stream_card_states.pop(str(message_id or ""), None)
+                return result
+            result = await self._stream_cardkit_content(state=stream_state, content=content)
+            if result.success:
+                result.message_id = message_id
+            return result
+
         try:
-            msg_type, payload = self._build_outbound_payload(content)
+            msg_type, payload = self._outbound_payload_for_edit(message_id, content)
             body = self._build_update_message_body(msg_type=msg_type, content=payload)
             request = self._build_update_message_request(message_id=message_id, request_body=body)
             response = await self._run_blocking(self._client.im.v1.message.update, request)
@@ -1971,6 +2483,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 result = self._finalize_send_result(fallback_response, "update failed")
             if result.success:
                 result.message_id = message_id
+                self._remember_outbound_message_type(message_id, msg_type)
             return result
         except Exception as exc:
             logger.error("[Feishu] Failed to edit message %s: %s", message_id, exc, exc_info=True)
@@ -2619,8 +3132,8 @@ class FeishuAdapter(BasePlatformAdapter):
             emoji_type,
         )
         # Drop bot/app-origin reactions to break the feedback loop from our
-        # own lifecycle reactions. A human reacting with the same emoji (e.g.
-        # clicking Typing on a bot message) is still routed through.
+        # own lifecycle reactions. A human reacting with the same emoji is
+        # still routed through.
         loop = self._loop
         if (
             operator_type in {"bot", "app"}
@@ -3061,6 +3574,34 @@ class FeishuAdapter(BasePlatformAdapter):
     def _reactions_enabled(self) -> bool:
         return os.getenv("FEISHU_REACTIONS", "true").strip().lower() not in {"false", "0", "no"}
 
+    @staticmethod
+    def _configured_reaction_type(env_name: str, default: str) -> str:
+        value = os.getenv(env_name, default).strip()
+        if value.lower() in {"", "false", "0", "off", "no", "none", "null"}:
+            return ""
+        return value
+
+    @classmethod
+    def _processing_start_reaction_type(cls) -> str:
+        return cls._configured_reaction_type(
+            _FEISHU_REACTION_IN_PROGRESS_ENV,
+            _FEISHU_REACTION_IN_PROGRESS,
+        )
+
+    @classmethod
+    def _processing_success_reaction_type(cls) -> str:
+        return cls._configured_reaction_type(
+            _FEISHU_REACTION_SUCCESS_ENV,
+            _FEISHU_REACTION_SUCCESS,
+        )
+
+    @classmethod
+    def _processing_cancelled_reaction_type(cls) -> str:
+        return cls._configured_reaction_type(
+            _FEISHU_REACTION_CANCELLED_ENV,
+            _FEISHU_REACTION_CANCELLED,
+        )
+
     async def _add_reaction(self, message_id: str, emoji_type: str) -> Optional[str]:
         """Return the reaction_id on success, else None. The id is needed later for deletion."""
         if not self._client or not message_id or not emoji_type:
@@ -3084,7 +3625,14 @@ class FeishuAdapter(BasePlatformAdapter):
             response = await self._run_blocking(self._client.im.v1.message_reaction.create, request)
             if response and getattr(response, "success", lambda: False)():
                 data = getattr(response, "data", None)
-                return getattr(data, "reaction_id", None)
+                reaction_id = getattr(data, "reaction_id", None)
+                logger.info(
+                    "[Feishu] Added reaction %s message_id=%s reaction_id=%s",
+                    emoji_type,
+                    _safe_token(message_id),
+                    _safe_token(reaction_id),
+                )
+                return reaction_id
             logger.debug(
                 "[Feishu] Add reaction %s on %s rejected: code=%s msg=%s",
                 emoji_type,
@@ -3114,6 +3662,11 @@ class FeishuAdapter(BasePlatformAdapter):
             )
             response = await self._run_blocking(self._client.im.v1.message_reaction.delete, request)
             if response and getattr(response, "success", lambda: False)():
+                logger.info(
+                    "[Feishu] Removed reaction message_id=%s reaction_id=%s",
+                    _safe_token(message_id),
+                    _safe_token(reaction_id),
+                )
                 return True
             logger.debug(
                 "[Feishu] Remove reaction %s on %s rejected: code=%s msg=%s",
@@ -3147,7 +3700,10 @@ class FeishuAdapter(BasePlatformAdapter):
         message_id = event.message_id
         if not message_id or message_id in self._pending_processing_reactions:
             return
-        reaction_id = await self._add_reaction(message_id, _FEISHU_REACTION_IN_PROGRESS)
+        emoji_type = self._processing_start_reaction_type()
+        if not emoji_type:
+            return
+        reaction_id = await self._add_reaction(message_id, emoji_type)
         if reaction_id:
             self._remember_processing_reaction(message_id, reaction_id)
 
@@ -3163,14 +3719,22 @@ class FeishuAdapter(BasePlatformAdapter):
         start_reaction_id = self._pending_processing_reactions.get(message_id)
         if start_reaction_id:
             if not await self._remove_reaction(message_id, start_reaction_id):
-                # Don't stack a second badge on top of a Typing we couldn't
+                # Don't stack a second badge on top of a start reaction we couldn't
                 # remove — UI would read as both "working" and "done/failed"
                 # simultaneously. Keep the handle so LRU eventually evicts it.
                 return
             self._pop_processing_reaction(message_id)
 
-        if outcome is ProcessingOutcome.FAILURE:
-            await self._add_reaction(message_id, _FEISHU_REACTION_FAILURE)
+        if outcome is ProcessingOutcome.SUCCESS:
+            emoji_type = self._processing_success_reaction_type()
+        elif outcome is ProcessingOutcome.CANCELLED:
+            emoji_type = self._processing_cancelled_reaction_type()
+        elif outcome is ProcessingOutcome.FAILURE:
+            emoji_type = _FEISHU_REACTION_FAILURE
+        else:
+            emoji_type = ""
+        if emoji_type:
+            await self._add_reaction(message_id, emoji_type)
 
     # =========================================================================
     # Webhook server and security
@@ -4606,10 +5170,11 @@ class FeishuAdapter(BasePlatformAdapter):
         reply_to: Optional[str],
         metadata: Optional[Dict[str, Any]],
     ) -> Any:
-        effective_reply_to = reply_to
-        if not effective_reply_to and metadata and metadata.get("thread_id"):
+        flat_replies = self._flat_outbound_replies_enabled()
+        effective_reply_to = None if flat_replies else reply_to
+        if not flat_replies and not effective_reply_to and metadata and metadata.get("thread_id"):
             effective_reply_to = metadata.get("reply_to_message_id")
-        reply_in_thread = bool((metadata or {}).get("thread_id"))
+        reply_in_thread = bool((metadata or {}).get("thread_id")) and not flat_replies
         if effective_reply_to:
             body = self._build_reply_message_body(
                 content=payload,
@@ -4623,7 +5188,7 @@ class FeishuAdapter(BasePlatformAdapter):
         # For topic/thread messages that fell back from reply→create, use
         # thread_id as receive_id so the message lands in the topic instead of
         # the main chat.
-        _thread_id = (metadata or {}).get("thread_id")
+        _thread_id = None if flat_replies else (metadata or {}).get("thread_id")
         if _thread_id:
             body = self._build_create_message_body(
                 receive_id=_thread_id,
@@ -4649,6 +5214,14 @@ class FeishuAdapter(BasePlatformAdapter):
             )
             request = self._build_create_message_request(receive_id_type, body)
         return await self._run_blocking(self._client.im.v1.message.create, request)
+
+    def _flat_outbound_replies_enabled(self) -> bool:
+        """Send Feishu bot responses as fresh group messages by default."""
+        extra = getattr(getattr(self, "config", None), "extra", {}) or {}
+        for key in ("flat_replies", "flat_outbound_replies"):
+            if key in extra:
+                return _to_boolean(extra.get(key))
+        return True
 
     @staticmethod
     def _response_succeeded(response: Any) -> bool:

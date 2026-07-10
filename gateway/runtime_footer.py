@@ -53,6 +53,42 @@ def _model_short(model: Optional[str]) -> str:
     return model.rsplit("/", 1)[-1]
 
 
+def _compact_number(value: int | float | None) -> str:
+    """Compact a token count using lower-case k/m suffixes."""
+    try:
+        num = float(value or 0)
+    except Exception:
+        num = 0.0
+    sign = "-" if num < 0 else ""
+    num = abs(num)
+    if num >= 1_000_000:
+        scaled = num / 1_000_000
+        text = f"{scaled:.1f}".rstrip("0").rstrip(".")
+        return f"{sign}{text}m"
+    if num >= 1_000:
+        scaled = num / 1_000
+        text = f"{scaled:.1f}".rstrip("0").rstrip(".")
+        return f"{sign}{text}k"
+    return f"{sign}{int(round(num))}"
+
+
+def _format_elapsed(seconds: float | int | None) -> str:
+    try:
+        sec = max(0.0, float(seconds or 0.0))
+    except Exception:
+        sec = 0.0
+    if sec < 60:
+        return f"{sec:.1f}s"
+    mins = int(sec // 60)
+    rem = int(round(sec % 60))
+    return f"{mins}m {rem}s"
+
+
+def _safe_footer_text(text: object) -> str:
+    """Keep footer metadata to one markdown-safe-ish line."""
+    return str(text or "").replace("\n", " ").strip()
+
+
 def resolve_footer_config(
     user_config: dict[str, Any] | None,
     platform_key: str | None = None,
@@ -119,6 +155,50 @@ def format_runtime_footer(
 
     if not parts:
         return ""
+    return _SEP.join(parts)
+
+
+def format_feishu_stream_footer(
+    *,
+    status: str = "已完成",
+    elapsed_seconds: float | int | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cache_read_tokens: int | None = None,
+    cache_write_tokens: int | None = None,
+    context_tokens: int | None = None,
+    context_length: int | None = None,
+    model: Optional[str] = None,
+) -> str:
+    """Render the Feishu CardKit streaming footer requested by the user.
+
+    Example:
+    ``已完成 · 耗时 8.3s · 输入 19k 输出 145 · 缓存 18k/1k (94%) · 上下文 19k/200k (10%) · claude-3-7-sonnet``
+    """
+    parts: list[str] = []
+    status_text = _safe_footer_text(status)
+    if status_text:
+        parts.append(status_text)
+    if elapsed_seconds is not None:
+        parts.append(f"耗时 {_format_elapsed(elapsed_seconds)}")
+    if input_tokens is not None or output_tokens is not None:
+        parts.append(
+            f"输入 {_compact_number(input_tokens or 0)} 输出 {_compact_number(output_tokens or 0)}"
+        )
+    if cache_read_tokens is not None or cache_write_tokens is not None:
+        read = max(0, int(cache_read_tokens or 0))
+        write = max(0, int(cache_write_tokens or 0))
+        denom = max(int(input_tokens or 0), read + write)
+        pct = int((read / denom) * 100) if denom > 0 else 0
+        parts.append(f"缓存 {_compact_number(read)}/{_compact_number(write)} ({pct}%)")
+    if context_tokens is not None and context_length:
+        used = max(0, int(context_tokens or 0))
+        total = max(0, int(context_length or 0))
+        pct = round((used / total) * 100) if total > 0 else 0
+        parts.append(f"上下文 {_compact_number(used)}/{_compact_number(total)} ({pct}%)")
+    model_text = _safe_footer_text(_model_short(model))
+    if model_text:
+        parts.append(model_text)
     return _SEP.join(parts)
 
 

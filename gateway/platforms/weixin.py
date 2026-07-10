@@ -908,15 +908,12 @@ def _split_text_for_weixin_delivery(
             chunks.extend(_pack_markdown_blocks_for_weixin(unit, max_length))
         return [c for c in chunks if c] or [content]
 
-    # Compact (default): single message when under the limit — unless the
-    # content looks like a short chatty exchange, in which case split into
-    # separate bubbles for a more natural chat feel.
+    # Compact (default): single message when under the limit.  Weixin does not
+    # support editable streaming, so splitting short multiline replies creates
+    # the same noisy multi-bubble behavior as fake streaming.  Keep the old
+    # line-by-line behavior behind split_multiline_messages=true only.
     if len(content) <= max_length:
-        return (
-            [u for u in _split_delivery_units_for_weixin(content) if u]
-            if _should_split_short_chat_block_for_weixin(content)
-            else [content]
-        )
+        return [content]
     return _pack_markdown_blocks_for_weixin(content, max_length) or [content]
 
 
@@ -1208,6 +1205,17 @@ class WeixinAdapter(BasePlatformAdapter):
             or os.getenv("WEIXIN_SPLIT_MULTILINE_MESSAGES"),
             default=False,
         )
+        self._processing_ack_enabled = _coerce_bool(
+            extra.get("processing_ack_enabled")
+            if "processing_ack_enabled" in extra
+            else os.getenv("WEIXIN_PROCESSING_ACK_ENABLED"),
+            default=True,
+        )
+        self._processing_ack_text = str(
+            extra.get("processing_ack_text")
+            or os.getenv("WEIXIN_PROCESSING_ACK_TEXT")
+            or "已收到，思考中"
+        ).strip()
 
         # Text debounce batching (mirrors Telegram adapter pattern).
         # iLink delivers messages individually, so rapid multi-message
@@ -1903,6 +1911,26 @@ class WeixinAdapter(BasePlatformAdapter):
             logger.error("[%s] send failed to=%s: %s", self.name, _safe_id(chat_id), exc)
             return SendResult(success=False, error=str(exc))
 
+    async def send_processing_ack(self, event: MessageEvent, session_key: str) -> None:
+        """Send Weixin's explicit immediate acknowledgement bubble.
+
+        Weixin cannot edit messages for true streaming cards.  The documented
+        UX is therefore: one short "received, thinking" bubble immediately,
+        then one final answer bubble when the run completes.  Slash commands
+        are excluded because their handlers already provide command-specific
+        feedback.
+        """
+        del session_key
+        if not self._processing_ack_enabled or not self._processing_ack_text:
+            return
+        text = (event.text or "").strip()
+        if text.startswith("/"):
+            return
+        await self.send(
+            chat_id=event.source.chat_id,
+            content=self._processing_ack_text,
+        )
+
     async def _ensure_typing_ticket(self, chat_id: str) -> Optional[str]:
         """Return a valid typing ticket, refreshing from getConfig if expired.
 
@@ -2278,6 +2306,248 @@ class WeixinAdapter(BasePlatformAdapter):
         return _wrap_copy_friendly_lines_for_weixin(_normalize_markdown_blocks(content))
 
 
+class MultiAccountWeixinAdapter(BasePlatformAdapter):
+    """Fan out one logical Hermes Weixin platform across multiple iLink accounts."""
+
+    supports_code_blocks = WeixinAdapter.supports_code_blocks
+    supports_async_delivery = WeixinAdapter.supports_async_delivery
+    splits_long_messages = WeixinAdapter.splits_long_messages
+    SUPPORTS_MESSAGE_EDITING = WeixinAdapter.SUPPORTS_MESSAGE_EDITING
+    MAX_MESSAGE_LENGTH = WeixinAdapter.MAX_MESSAGE_LENGTH
+
+    def __init__(self, config: PlatformConfig):
+        super().__init__(config, Platform.WEIXIN)
+        self._adapters = [
+            WeixinAdapter(child_config)
+            for child_config in self._account_configs(config)
+        ]
+
+    @staticmethod
+    def _account_entries(config: PlatformConfig) -> List[Dict[str, Any]]:
+        extra = config.extra or {}
+        raw_accounts = extra.get("accounts") or []
+        if isinstance(raw_accounts, dict):
+            raw_accounts = list(raw_accounts.values())
+        if not isinstance(raw_accounts, list):
+            return []
+        return [dict(account) for account in raw_accounts if isinstance(account, dict)]
+
+    @classmethod
+    def is_multi_account_config(cls, config: PlatformConfig) -> bool:
+        return len(cls._account_entries(config)) > 1
+
+    @classmethod
+    def _account_configs(cls, config: PlatformConfig) -> List[PlatformConfig]:
+        base_extra = dict(config.extra or {})
+        accounts = cls._account_entries(config)
+        base_extra.pop("accounts", None)
+
+        if not accounts:
+            return [config]
+
+        result: List[PlatformConfig] = []
+        for account in accounts:
+            account_extra = dict(base_extra)
+            account_extra.update(account)
+            token = str(account.get("token") or config.token or "").strip()
+            result.append(
+                PlatformConfig(
+                    enabled=config.enabled,
+                    token=token,
+                    home_channel=config.home_channel,
+                    extra=account_extra,
+                )
+            )
+        return result
+
+    @property
+    def enforces_own_access_policy(self) -> bool:
+        return True
+
+    def _propagate_runtime_hooks(self, adapter: WeixinAdapter) -> None:
+        if self._message_handler is not None:
+            adapter.set_message_handler(self._message_handler)
+        adapter.set_session_store(getattr(self, "_session_store", None))
+        adapter.set_busy_session_handler(getattr(self, "_busy_session_handler", None))
+        adapter.set_topic_recovery_fn(getattr(self, "_topic_recovery_fn", None))
+        adapter.set_authorization_check(getattr(self, "_authorization_check", None))
+        adapter._busy_text_mode = getattr(self, "_busy_text_mode", adapter._busy_text_mode)
+        adapter._auto_tts_default = getattr(self, "_auto_tts_default", adapter._auto_tts_default)
+        adapter._auto_tts_enabled_chats = getattr(self, "_auto_tts_enabled_chats", set())
+        adapter._auto_tts_disabled_chats = getattr(self, "_auto_tts_disabled_chats", set())
+
+    def set_message_handler(self, handler) -> None:
+        super().set_message_handler(handler)
+        for adapter in self._adapters:
+            adapter.set_message_handler(handler)
+
+    def set_session_store(self, session_store: Any) -> None:
+        super().set_session_store(session_store)
+        for adapter in self._adapters:
+            adapter.set_session_store(session_store)
+
+    def set_busy_session_handler(self, handler) -> None:
+        super().set_busy_session_handler(handler)
+        for adapter in self._adapters:
+            adapter.set_busy_session_handler(handler)
+
+    def set_topic_recovery_fn(self, fn) -> None:
+        super().set_topic_recovery_fn(fn)
+        for adapter in self._adapters:
+            adapter.set_topic_recovery_fn(fn)
+
+    def set_authorization_check(self, callback) -> None:
+        super().set_authorization_check(callback)
+        for adapter in self._adapters:
+            adapter.set_authorization_check(callback)
+
+    async def connect(self, *, is_reconnect: bool = False) -> bool:
+        if not self._adapters:
+            self._set_fatal_error(
+                "weixin_no_accounts",
+                "Weixin startup failed: no accounts configured",
+                retryable=False,
+            )
+            return False
+
+        connected = 0
+        for adapter in self._adapters:
+            self._propagate_runtime_hooks(adapter)
+            try:
+                if await adapter.connect(is_reconnect=is_reconnect):
+                    connected += 1
+                else:
+                    await adapter.disconnect()
+            except Exception as exc:
+                logger.error(
+                    "[%s] child account %s failed to connect: %s",
+                    self.name,
+                    _safe_id(getattr(adapter, "_account_id", "")),
+                    exc,
+                )
+                try:
+                    await adapter.disconnect()
+                except Exception:
+                    logger.debug("[%s] child disconnect after failed connect failed", self.name, exc_info=True)
+
+        if connected == 0:
+            self._set_fatal_error(
+                "weixin_all_accounts_failed",
+                "Weixin startup failed: all configured accounts failed to connect",
+                retryable=True,
+            )
+            await self._notify_fatal_error()
+            return False
+
+        self._mark_connected()
+        logger.info("[%s] Connected %d/%d account(s)", self.name, connected, len(self._adapters))
+        return True
+
+    async def disconnect(self) -> None:
+        for adapter in list(self._adapters):
+            try:
+                await adapter.disconnect()
+            except Exception:
+                logger.debug("[%s] child disconnect failed", self.name, exc_info=True)
+        self._mark_disconnected()
+        logger.info("[%s] Disconnected multi-account adapter", self.name)
+
+    def _connected_adapters(self) -> List[WeixinAdapter]:
+        return [adapter for adapter in self._adapters if adapter.is_connected]
+
+    def _select_adapter(self, chat_id: str) -> Optional[WeixinAdapter]:
+        candidates = self._connected_adapters() or self._adapters
+        for adapter in candidates:
+            try:
+                if adapter._token_store.get(adapter._account_id, chat_id):
+                    return adapter
+            except Exception:
+                logger.debug("[%s] context-token lookup failed", self.name, exc_info=True)
+        return candidates[0] if candidates else None
+
+    def format_message(self, content: Optional[str]) -> str:
+        adapter = self._adapters[0] if self._adapters else None
+        if adapter is not None:
+            return adapter.format_message(content)
+        return "" if content is None else str(content)
+
+    async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
+        adapter = self._select_adapter(chat_id)
+        if adapter is not None:
+            return await adapter.get_chat_info(chat_id)
+        chat_type = "group" if chat_id.endswith("@chatroom") else "dm"
+        return {"name": chat_id, "type": chat_type, "chat_id": chat_id}
+
+    async def send(
+        self,
+        chat_id: str,
+        content: str,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        adapter = self._select_adapter(chat_id)
+        if adapter is None:
+            return SendResult(success=False, error="No Weixin accounts configured")
+        return await adapter.send(chat_id, content, reply_to=reply_to, metadata=metadata)
+
+    async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        adapter = self._select_adapter(chat_id)
+        if adapter is not None:
+            await adapter.send_typing(chat_id, metadata=metadata)
+
+    async def stop_typing(self, chat_id: str) -> None:
+        adapter = self._select_adapter(chat_id)
+        if adapter is not None:
+            await adapter.stop_typing(chat_id)
+
+    async def send_image(self, chat_id: str, image_url: str, caption: str,
+                         reply_to: Optional[str] = None,
+                         metadata: Optional[Dict[str, Any]] = None) -> SendResult:
+        adapter = self._select_adapter(chat_id)
+        if adapter is None:
+            return SendResult(success=False, error="No Weixin accounts configured")
+        return await adapter.send_image(chat_id, image_url, caption, reply_to=reply_to, metadata=metadata)
+
+    async def send_image_file(self, chat_id: str, image_path: str,
+                              caption: Optional[str] = None,
+                              reply_to: Optional[str] = None,
+                              metadata: Optional[Dict[str, Any]] = None,
+                              **kwargs) -> SendResult:
+        adapter = self._select_adapter(chat_id)
+        if adapter is None:
+            return SendResult(success=False, error="No Weixin accounts configured")
+        return await adapter.send_image_file(chat_id, image_path, caption=caption, reply_to=reply_to, metadata=metadata, **kwargs)
+
+    async def send_document(self, chat_id: str, file_path: str,
+                            caption: Optional[str] = None,
+                            file_name: Optional[str] = None,
+                            reply_to: Optional[str] = None,
+                            metadata: Optional[Dict[str, Any]] = None,
+                            **kwargs) -> SendResult:
+        adapter = self._select_adapter(chat_id)
+        if adapter is None:
+            return SendResult(success=False, error="No Weixin accounts configured")
+        return await adapter.send_document(chat_id, file_path, caption=caption, file_name=file_name, reply_to=reply_to, metadata=metadata, **kwargs)
+
+    async def send_video(self, chat_id: str, video_path: str,
+                         caption: Optional[str] = None,
+                         reply_to: Optional[str] = None,
+                         metadata: Optional[Dict[str, Any]] = None) -> SendResult:
+        adapter = self._select_adapter(chat_id)
+        if adapter is None:
+            return SendResult(success=False, error="No Weixin accounts configured")
+        return await adapter.send_video(chat_id, video_path, caption=caption, reply_to=reply_to, metadata=metadata)
+
+    async def send_voice(self, chat_id: str, audio_path: str,
+                         caption: Optional[str] = None,
+                         reply_to: Optional[str] = None,
+                         metadata: Optional[Dict[str, Any]] = None) -> SendResult:
+        adapter = self._select_adapter(chat_id)
+        if adapter is None:
+            return SendResult(success=False, error="No Weixin accounts configured")
+        return await adapter.send_voice(chat_id, audio_path, caption=caption, reply_to=reply_to, metadata=metadata)
+
+
 async def send_weixin_direct(
     *,
     extra: Dict[str, Any],
@@ -2291,17 +2561,68 @@ async def send_weixin_direct(
 
     This bypasses the long-poll adapter lifecycle and uses the raw API directly.
     """
-    account_id = str(extra.get("account_id") or os.getenv("WEIXIN_ACCOUNT_ID", "")).strip()
-    base_url = str(extra.get("base_url") or os.getenv("WEIXIN_BASE_URL", ILINK_BASE_URL)).strip().rstrip("/")
-    cdn_base_url = str(extra.get("cdn_base_url") or os.getenv("WEIXIN_CDN_BASE_URL", WEIXIN_CDN_BASE_URL)).strip().rstrip("/")
-    resolved_token = str(token or extra.get("token") or os.getenv("WEIXIN_TOKEN", "")).strip()
-    if not resolved_token:
-        return {"error": "Weixin token missing. Configure WEIXIN_TOKEN or platforms.weixin.token."}
-    if not account_id:
+    hermes_home = str(get_hermes_home())
+    token_store = ContextTokenStore(hermes_home)
+
+    def _account_candidates() -> List[Dict[str, str]]:
+        candidates: List[Dict[str, str]] = []
+        raw_accounts = extra.get("accounts") if isinstance(extra, dict) else None
+        if isinstance(raw_accounts, dict):
+            raw_accounts = list(raw_accounts.values())
+        if isinstance(raw_accounts, list):
+            for account in raw_accounts:
+                if not isinstance(account, dict):
+                    continue
+                account_id_value = str(account.get("account_id") or "").strip()
+                if not account_id_value:
+                    continue
+                candidates.append({
+                    "account_id": account_id_value,
+                    "token": str(account.get("token") or token or "").strip(),
+                    "base_url": str(account.get("base_url") or extra.get("base_url") or os.getenv("WEIXIN_BASE_URL", ILINK_BASE_URL)).strip().rstrip("/"),
+                    "cdn_base_url": str(account.get("cdn_base_url") or extra.get("cdn_base_url") or os.getenv("WEIXIN_CDN_BASE_URL", WEIXIN_CDN_BASE_URL)).strip().rstrip("/"),
+                })
+        primary_account_id = str(extra.get("account_id") or os.getenv("WEIXIN_ACCOUNT_ID", "")).strip()
+        if primary_account_id:
+            candidates.append({
+                "account_id": primary_account_id,
+                "token": str(token or extra.get("token") or os.getenv("WEIXIN_TOKEN", "")).strip(),
+                "base_url": str(extra.get("base_url") or os.getenv("WEIXIN_BASE_URL", ILINK_BASE_URL)).strip().rstrip("/"),
+                "cdn_base_url": str(extra.get("cdn_base_url") or os.getenv("WEIXIN_CDN_BASE_URL", WEIXIN_CDN_BASE_URL)).strip().rstrip("/"),
+            })
+        seen: set[str] = set()
+        deduped: List[Dict[str, str]] = []
+        for candidate in candidates:
+            account_id_value = candidate["account_id"]
+            if account_id_value in seen:
+                continue
+            seen.add(account_id_value)
+            deduped.append(candidate)
+        return deduped
+
+    candidates = _account_candidates()
+    selected = candidates[0] if candidates else None
+    for candidate in candidates:
+        token_store.restore(candidate["account_id"])
+        if token_store.get(candidate["account_id"], chat_id):
+            selected = candidate
+            break
+
+    if selected is None:
         return {"error": "Weixin account ID missing. Configure WEIXIN_ACCOUNT_ID or platforms.weixin.extra.account_id."}
 
-    token_store = ContextTokenStore(str(get_hermes_home()))
-    token_store.restore(account_id)
+    account_id = selected["account_id"]
+    base_url = selected["base_url"]
+    cdn_base_url = selected["cdn_base_url"]
+    resolved_token = selected["token"]
+    if not resolved_token:
+        persisted = load_weixin_account(hermes_home, account_id)
+        if persisted:
+            resolved_token = str(persisted.get("token") or "").strip()
+            base_url = str(persisted.get("base_url") or base_url).strip().rstrip("/")
+    if not resolved_token:
+        return {"error": "Weixin token missing. Configure WEIXIN_TOKEN or platforms.weixin.token."}
+
     context_token = token_store.get(account_id, chat_id)
 
     live_adapter = _LIVE_ADAPTERS.get(resolved_token)

@@ -146,6 +146,42 @@ _GATEWAY_RATE_LIMIT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_WEIXIN_MODEL_SWITCH_ACTION_RE = re.compile(
+    r"(切换|切換|切到|换成|換成|换到|換到|改成|设为|設為|保持|switch)",
+    re.IGNORECASE,
+)
+_WEIXIN_GPT53_RE = re.compile(
+    r"gpt\s*-?\s*5\s*[.\-]?\s*3|gpt5\s*[.\-]?\s*3",
+    re.IGNORECASE,
+)
+_WEIXIN_GPT55_RE = re.compile(
+    r"gpt\s*-?\s*5\s*[.\-]?\s*5|gpt5\s*[.\-]?\s*5",
+    re.IGNORECASE,
+)
+_WEIXIN_CURRENT_SESSION_MARKERS = (
+    "这个会话",
+    "這個會話",
+    "本会话",
+    "本會話",
+    "当前会话",
+    "當前會話",
+    "自己的模型",
+    "它自己的模型",
+    "自己模型",
+)
+_WEIXIN_GLOBAL_MODEL_MARKERS = (
+    "其他会话",
+    "其它会话",
+    "其他會話",
+    "其它會話",
+    "所有会话",
+    "全部会话",
+    "默认",
+    "默認",
+    "全局",
+    "global",
+)
+
 _GATEWAY_SECRET_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_\-]{12,}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),
@@ -155,6 +191,31 @@ _GATEWAY_SECRET_PATTERNS = (
     re.compile(r"\bglpat-[A-Za-z0-9_\-]{20,}\b"),
     re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._\-]{20,}\b"),
 )
+
+
+def _weixin_natural_model_switch_command(text: str) -> Optional[str]:
+    """Translate narrow Weixin model-switch phrases into a session /model command."""
+    raw = (text or "").strip()
+    if not raw or raw.startswith("/") or len(raw) > 160:
+        return None
+    lowered = raw.lower()
+    if not _WEIXIN_MODEL_SWITCH_ACTION_RE.search(lowered):
+        return None
+
+    has_current_marker = any(marker in raw for marker in _WEIXIN_CURRENT_SESSION_MARKERS)
+    has_global_marker = any(marker in raw for marker in _WEIXIN_GLOBAL_MODEL_MARKERS)
+    if has_global_marker and not has_current_marker:
+        return None
+
+    target = ""
+    if _WEIXIN_GPT53_RE.search(lowered):
+        target = "gpt-5.3-codex-spark"
+    elif _WEIXIN_GPT55_RE.search(lowered):
+        target = "gpt-5.5"
+    if not target:
+        return None
+
+    return f"/model {target} --provider openai-codex --session"
 
 
 def _ensure_windows_gateway_venv_imports() -> None:
@@ -479,6 +540,8 @@ async def _send_or_update_status_coro(adapter, chat_id, status_key, content, met
     Telegram) edit the previous bubble for the same status_key instead of
     appending a new one. Adapters without the method fall back to plain send.
     """
+    if getattr(adapter, "SUPPRESSES_INTERIM_STATUS_MESSAGES", False) is True:
+        return None
     sender = getattr(adapter, "send_or_update_status", None)
     if callable(sender):
         return await sender(chat_id, status_key, content, metadata=metadata)
@@ -545,6 +608,97 @@ def _resolve_gateway_display_bool(
     if value is None:
         return bool(default)
     return bool(value)
+
+
+def _channel_override_map(user_config: dict, platform_key: str, key: str) -> dict:
+    """Return a per-channel override map from modern or legacy config."""
+    cfg = user_config if isinstance(user_config, dict) else {}
+    platforms = cfg.get("platforms")
+    if isinstance(platforms, dict):
+        platform_cfg = platforms.get(platform_key)
+        if isinstance(platform_cfg, dict):
+            extra = platform_cfg.get("extra")
+            if isinstance(extra, dict) and isinstance(extra.get(key), dict):
+                return extra[key]
+            if isinstance(platform_cfg.get(key), dict):
+                return platform_cfg[key]
+    legacy = cfg.get(platform_key)
+    if isinstance(legacy, dict) and isinstance(legacy.get(key), dict):
+        return legacy[key]
+    return {}
+
+
+def _source_channel_keys(source: Any) -> list[str]:
+    """Return candidate channel identifiers, most-specific first."""
+    keys: list[str] = []
+    for attr in ("chat_id", "thread_id", "user_id", "user_id_alt"):
+        value = str(getattr(source, attr, "") or "").strip()
+        if value and value not in keys:
+            keys.append(value)
+    keys.append("*")
+    return keys
+
+
+def _resolve_channel_compression_override(user_config: dict, source: Any) -> Optional[dict]:
+    """Resolve compression override for a gateway source, if configured."""
+    platform_key = _platform_config_key(getattr(source, "platform", ""))
+    overrides = _channel_override_map(user_config, platform_key, "channel_compression_overrides")
+    for key in _source_channel_keys(source):
+        if key not in overrides:
+            continue
+        value = overrides[key]
+        if isinstance(value, dict):
+            result = dict(value)
+        else:
+            result = {"threshold": value}
+        if "threshold" in result:
+            try:
+                result["threshold"] = float(result["threshold"])
+            except (TypeError, ValueError):
+                result.pop("threshold", None)
+        return result
+    return None
+
+
+def _apply_context_compression_override(agent: Any, override: Optional[dict]) -> bool:
+    """Apply a narrow compression override to a live agent's compressor."""
+    if not override or not hasattr(agent, "context_compressor"):
+        return False
+    compressor = getattr(agent, "context_compressor", None)
+    if compressor is None:
+        return False
+    changed = False
+    threshold = override.get("threshold")
+    if threshold is not None and hasattr(compressor, "threshold_percent"):
+        threshold = float(threshold)
+        if getattr(compressor, "threshold_percent", None) != threshold:
+            compressor.threshold_percent = threshold
+            changed = True
+        context_length = int(getattr(compressor, "context_length", 0) or 0)
+        if context_length > 0:
+            threshold_tokens = int(context_length * threshold)
+            if hasattr(compressor, "threshold_tokens"):
+                compressor.threshold_tokens = threshold_tokens
+            ratio = float(getattr(compressor, "summary_target_ratio", 0.20) or 0.20)
+            if hasattr(compressor, "tail_token_budget"):
+                compressor.tail_token_budget = int(threshold_tokens * ratio)
+    if "protect_last_n" in override and hasattr(compressor, "protect_last_n"):
+        protect_last_n = int(override["protect_last_n"])
+        if getattr(compressor, "protect_last_n", None) != protect_last_n:
+            compressor.protect_last_n = protect_last_n
+            changed = True
+    return changed
+
+
+def _resolve_enabled_toolsets_for_source(user_config: dict, platform_key: str, source: Any) -> list[str]:
+    """Resolve enabled toolsets, allowing per-channel overrides."""
+    overrides = _channel_override_map(user_config, platform_key, "channel_toolsets")
+    for key in _source_channel_keys(source):
+        if key in overrides and isinstance(overrides[key], list):
+            return [str(item) for item in overrides[key] if str(item).strip()]
+    from hermes_cli.tools_config import _get_platform_tools
+
+    return sorted(_get_platform_tools(user_config, platform_key))
 
 
 def _telegramize_command_mentions(text: str, platform: Any) -> str:
@@ -6911,16 +7065,62 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         enabled_platform_count = 0
         startup_nonretryable_errors: list[str] = []
         startup_retryable_errors: list[str] = []
+        try:
+            logger.info(
+                "Startup enabled platforms: %s",
+                ", ".join(
+                    platform.value
+                    for platform, platform_config in self.config.platforms.items()
+                    if getattr(platform_config, "enabled", False)
+                ) or "(none)",
+            )
+        except Exception:
+            logger.debug("Could not log startup platform list", exc_info=True)
         
         # Initialize and connect each configured platform
         for platform, platform_config in self.config.platforms.items():
-            if await self._abort_startup_if_shutdown_requested():
+            try:
+                _abort_requested = await asyncio.wait_for(
+                    self._abort_startup_if_shutdown_requested(),
+                    timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Startup abort check timed out before %s; continuing startup",
+                    platform.value,
+                )
+                _abort_requested = False
+            if _abort_requested:
                 return True
             if not platform_config.enabled:
                 continue
             enabled_platform_count += 1
             
-            adapter = self._create_adapter(platform, platform_config)
+            try:
+                adapter = await asyncio.wait_for(
+                    asyncio.to_thread(self._create_adapter, platform, platform_config),
+                    timeout=10.0,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "✗ %s adapter creation timed out after 10s; queuing for retry",
+                    platform.value,
+                )
+                self._update_platform_runtime_status(
+                    platform.value,
+                    platform_state="retrying",
+                    error_code=None,
+                    error_message="adapter creation timed out",
+                )
+                startup_retryable_errors.append(
+                    f"{platform.value}: adapter creation timed out"
+                )
+                self._failed_platforms[platform] = {
+                    "config": platform_config,
+                    "attempts": 1,
+                    "next_retry": time.monotonic() + 30,
+                }
+                continue
             if not adapter:
                 # Distinguish between missing builtin deps and missing plugin
                 _pval = platform.value
@@ -7130,9 +7330,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         hook_count = len(self.hooks.loaded_hooks)
         if hook_count:
             logger.info("%s hook(s) loaded", hook_count)
-        await self.hooks.emit("gateway:startup", {
-            "platforms": [p.value for p in self.adapters.keys()],
-        })
+        try:
+            await asyncio.wait_for(
+                self.hooks.emit("gateway:startup", {
+                    "platforms": [p.value for p in self.adapters.keys()],
+                }),
+                timeout=10.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("gateway:startup hooks timed out after 10s; continuing startup")
         
         if connected_count > 0:
             logger.info("Gateway running with %s platform(s)", connected_count)
@@ -8576,10 +8782,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return SignalAdapter(config)
 
         elif platform == Platform.WEIXIN:
-            from gateway.platforms.weixin import WeixinAdapter, check_weixin_requirements
+            from gateway.platforms.weixin import (
+                WeixinAdapter,
+                check_weixin_requirements,
+            )
+            try:
+                from gateway.platforms.weixin import MultiAccountWeixinAdapter  # type: ignore[attr-defined]
+            except ImportError:
+                MultiAccountWeixinAdapter = None  # type: ignore[assignment]
             if not check_weixin_requirements():
                 logger.warning("Weixin: aiohttp/cryptography not installed")
                 return None
+            if (
+                MultiAccountWeixinAdapter is not None
+                and MultiAccountWeixinAdapter.is_multi_account_config(config)
+            ):
+                return MultiAccountWeixinAdapter(config)
             return WeixinAdapter(config)
 
         elif platform == Platform.API_SERVER:
@@ -8855,6 +9073,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Otherwise control/session commands like /new or /help get silently
         # consumed as update answers instead of being dispatched normally.
         _quick_key = self._session_key_for_source(source)
+        if source.platform == Platform.WEIXIN:
+            _natural_model_command = _weixin_natural_model_switch_command(event.text or "")
+            if _natural_model_command:
+                logger.info(
+                    "Weixin natural model switch fast-path: chat=%s command=%s",
+                    source.chat_id,
+                    _natural_model_command,
+                )
+                event = dataclasses.replace(event, text=_natural_model_command)
+                source = event.source
         _update_prompts = getattr(self, "_update_prompt_pending", {})
         if _update_prompts.get(_quick_key):
             raw = (event.text or "").strip()
@@ -11527,6 +11755,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             except Exception as _footer_err:
                 logger.debug("runtime_footer build failed: %s", _footer_err)
                 _footer_line = ""
+            if agent_result.get("feishu_stream_footer_embedded"):
+                _footer_line = ""
             if _footer_line and response and not agent_result.get("already_sent") and not _intentional_silence:
                 response = f"{response}\n\n{_footer_line}"
 
@@ -13067,8 +13297,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             platform_key = _platform_config_key(source.platform)
 
-            from hermes_cli.tools_config import _get_platform_tools
-            enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+            enabled_toolsets = sorted(_resolve_enabled_toolsets_for_source(user_config, platform_key, source))
             agent_cfg = user_config.get("agent") or {}
             disabled_toolsets = agent_cfg.get("disabled_toolsets") or None
 
@@ -16710,6 +16939,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         from run_agent import AIAgent
         import queue
+        _agent_run_started_at = time.monotonic()
 
         def _run_still_current() -> bool:
             if run_generation is None or not session_key:
@@ -16719,8 +16949,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         user_config = _load_gateway_config()
         platform_key = _platform_config_key(source.platform)
 
-        from hermes_cli.tools_config import _get_platform_tools
-        enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+        enabled_toolsets = sorted(_resolve_enabled_toolsets_for_source(user_config, platform_key, source))
         agent_cfg_local = user_config.get("agent") or {}
         disabled_toolsets = agent_cfg_local.get("disabled_toolsets") or None
 
@@ -16847,9 +17076,57 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _thinking_enabled = _thinking_mode != "off"
         needs_progress_queue = tool_progress_enabled or _thinking_enabled
 
+        stream_consumer_holder = [None]  # Mutable container for stream consumer
+
+        _scfg_for_inline_progress = getattr(getattr(self, "config", None), "streaming", None)
+        if _scfg_for_inline_progress is None:
+            from gateway.config import StreamingConfig
+            _scfg_for_inline_progress = StreamingConfig()
+        _plat_streaming_for_inline_progress = resolve_display_setting(
+            user_config, platform_key, "streaming"
+        )
+        _streaming_enabled_for_inline_progress = (
+            _scfg_for_inline_progress.enabled
+            and _scfg_for_inline_progress.transport != "off"
+            if _plat_streaming_for_inline_progress is None
+            else bool(_plat_streaming_for_inline_progress)
+        )
+        _feishu_inline_stream_progress = (
+            source.platform == Platform.FEISHU
+            and bool(_streaming_enabled_for_inline_progress)
+        )
+
+        class _InlineStreamProgressQueue:
+            """Forward tool/status progress into the active stream message."""
+
+            def put(self, raw):
+                consumer = stream_consumer_holder[0]
+                if consumer is None:
+                    return
+                if isinstance(raw, tuple) and raw:
+                    if raw[0] == "__reset__":
+                        return
+                    if len(raw) == 2 and raw[0] == "__replace_last__":
+                        consumer.on_progress(str(raw[1]), replace_last=True)
+                        return
+                    if len(raw) == 3 and raw[0] == "__dedup__":
+                        _, base_msg, count = raw
+                        consumer.on_progress(f"{base_msg} (×{count + 1})", replace_last=True)
+                        return
+                consumer.on_progress(str(raw))
+
+            def empty(self) -> bool:
+                return True
+
+            def get_nowait(self):
+                raise queue.Empty
 
         # Queue for progress messages (thread-safe)
-        progress_queue = queue.Queue() if needs_progress_queue else None
+        progress_queue = (
+            _InlineStreamProgressQueue()
+            if needs_progress_queue and _feishu_inline_stream_progress
+            else (queue.Queue() if needs_progress_queue else None)
+        )
         last_tool = [None]  # Mutable container for tracking in closure
         last_progress_msg = [None]  # Track last message for dedup
         repeat_count = [0]  # How many times the same message repeated
@@ -17034,6 +17311,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _progress_adapter = None
             if (
                 getattr(_progress_adapter, "supports_code_blocks", False)
+                and not _feishu_inline_stream_progress
                 and tool_name == "terminal"
                 and isinstance(args, dict)
                 and isinstance(args.get("command"), str)
@@ -17132,7 +17410,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return
             last_progress_msg[0] = msg
             repeat_count[0] = 0
-            
             progress_queue.put(msg)
         
         # Background task to send progress messages
@@ -17550,7 +17827,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         agent_holder = [None]  # Mutable container for the agent instance
         result_holder = [None]  # Mutable container for the result
         tools_holder = [None]   # Mutable container for the tool definitions
-        stream_consumer_holder = [None]  # Mutable container for stream consumer
         
         # Bridge sync step_callback → async hooks.emit for agent:step events
         _loop_for_step = asyncio.get_running_loop()
@@ -17608,6 +17884,44 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         else:
             _status_thread_metadata = self._thread_metadata_for_source(source, event_message_id) if _progress_thread_id else None
 
+        if _feishu_inline_stream_progress and stream_consumer_holder[0] is None:
+            try:
+                from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
+
+                _adapter = self.adapters.get(source.platform)
+                if _adapter is not None and getattr(_adapter, "SUPPORTS_MESSAGE_EDITING", True):
+                    _effective_cursor = _scfg_for_inline_progress.cursor
+                    _consumer_cfg = StreamConsumerConfig(
+                        edit_interval=_scfg_for_inline_progress.edit_interval,
+                        buffer_threshold=_scfg_for_inline_progress.buffer_threshold,
+                        cursor=_effective_cursor,
+                        buffer_only=False,
+                        fresh_final_after_seconds=0.0,
+                        transport=_scfg_for_inline_progress.transport or "edit",
+                        chat_type=getattr(source, "chat_type", "") or "",
+                    )
+                    _early_stream_consumer = GatewayStreamConsumer(
+                        adapter=_adapter,
+                        chat_id=source.chat_id,
+                        config=_consumer_cfg,
+                        metadata=_status_thread_metadata,
+                        on_new_message=(
+                            (lambda: progress_queue.put(("__reset__",)))
+                            if progress_queue is not None
+                            else None
+                        ),
+                        initial_reply_to_id=event_message_id,
+                    )
+                    _early_stream_consumer.on_progress("已收到消息，正在启动模型和工具调度")
+                    stream_consumer_holder[0] = _early_stream_consumer
+                    logger.info(
+                        "Created Feishu inline stream consumer for chat=%s reply_to=%s",
+                        source.chat_id,
+                        event_message_id or "",
+                    )
+            except Exception as _early_stream_err:
+                logger.debug("Could not pre-start Feishu stream card: %s", _early_stream_err)
+
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter or not _run_still_current():
                 return
@@ -17623,6 +17937,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     event_type,
                     _redact_gateway_user_facing_secrets(str(message or ""))[:160],
                 )
+                return
+            if _feishu_inline_stream_progress and progress_queue is not None:
+                progress_queue.put(prepared_message)
                 return
             _fut = safe_schedule_threadsafe(
                 _send_or_update_status_coro(_status_adapter, _status_chat_id, event_type, prepared_message, _status_thread_metadata),
@@ -17715,7 +18032,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             self._reasoning_config = reasoning_config
             self._service_tier = self._load_service_tier()
             # Set up stream consumer for token streaming or interim commentary.
-            _stream_consumer = None
+            _stream_consumer = stream_consumer_holder[0]
             _stream_delta_cb = None
             _scfg = getattr(getattr(self, 'config', None), 'streaming', None)
             if _scfg is None:
@@ -17738,10 +18055,43 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _want_interim_messages = interim_assistant_messages_enabled
             _want_interim_consumer = _want_interim_messages
             if _want_stream_deltas or _want_interim_consumer:
+                def _stream_start_preview_text(raw_message: Any) -> Optional[str]:
+                    template = resolve_display_setting(
+                        user_config, platform_key, "stream_start_placeholder", None,
+                    )
+                    if not template:
+                        return None
+                    try:
+                        if isinstance(raw_message, list):
+                            parts = []
+                            for part in raw_message:
+                                if isinstance(part, dict) and part.get("type") == "text":
+                                    parts.append(str(part.get("text") or ""))
+                            user_line = " ".join(p.strip() for p in parts if p.strip())
+                        else:
+                            user_line = str(raw_message or "")
+                    except Exception:
+                        user_line = ""
+                    user_line = re.sub(r"\s+", " ", user_line).strip()
+                    if len(user_line) > 240:
+                        user_line = user_line[:237].rstrip() + "..."
+                    text = str(template).strip()
+                    if "{message}" in text or "{user_message}" in text:
+                        try:
+                            return text.format(message=user_line, user_message=user_line)
+                        except Exception:
+                            return text
+                    if user_line:
+                        text = f"{text}\n\n用户消息：{user_line}"
+                    return text
+
                 try:
-                    from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
-                    _adapter = self._adapter_for_source(source)
-                    if _adapter:
+                    if _stream_consumer is None:
+                        from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
+                        _adapter = self._adapter_for_source(source)
+                    else:
+                        _adapter = self._adapter_for_source(source)
+                    if _stream_consumer is None and _adapter:
                         _pause_typing_before_finalize = None
                         if source.platform == Platform.TELEGRAM and hasattr(_adapter, "pause_typing_for_chat"):
                             def _pause_typing_before_finalize(
@@ -17797,11 +18147,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             initial_reply_to_id=event_message_id,
                             run_still_current=_run_still_current,
                         )
-                        if _want_stream_deltas:
-                            def _stream_delta_cb(text: str) -> None:
-                                if _run_still_current():
-                                    _stream_consumer.on_delta(text)
+                        _preview_text = (
+                            _stream_start_preview_text(message)
+                            if _want_stream_deltas and not _feishu_inline_stream_progress
+                            else None
+                        )
+                        if _preview_text:
+                            _stream_consumer.on_preview(_preview_text)
                         stream_consumer_holder[0] = _stream_consumer
+                    if _stream_consumer is not None and _want_stream_deltas:
+                        def _stream_delta_cb(text: str) -> None:
+                            if _run_still_current():
+                                if _feishu_inline_stream_progress and text is None:
+                                    return
+                                _stream_consumer.on_delta(text)
                 except Exception as _sc_err:
                     logger.debug("Could not set up stream consumer: %s", _sc_err)
 
@@ -17810,12 +18169,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     return
                 display_text = text
                 if _stream_consumer is not None:
+                    if _feishu_inline_stream_progress:
+                        if str(display_text or "").strip():
+                            _stream_consumer.on_progress(str(display_text))
+                        return
                     if already_streamed:
                         _stream_consumer.on_segment_break()
                     else:
                         _stream_consumer.on_commentary(display_text)
                     return
                 if already_streamed or not _status_adapter or not str(display_text or "").strip():
+                    return
+                if getattr(_status_adapter, "SUPPRESSES_INTERIM_ASSISTANT_MESSAGES", False) is True:
                     return
                 safe_schedule_threadsafe(
                     _status_adapter.send(
@@ -18000,6 +18365,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         self._enforce_agent_cache_cap()
                 logger.debug("Created new agent for session %s (sig=%s)", session_key, _sig)
 
+            try:
+                self._apply_channel_compression_override(agent, source, user_config)
+            except Exception as exc:
+                logger.debug("Channel compression override failed: %s", exc)
+
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.
             # Gate on needs_progress_queue (tool_progress OR thinking_progress)
@@ -18064,6 +18434,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             def _deliver_bg_review_message(message: str) -> None:
                 if not _status_adapter or not _run_still_current():
+                    return
+                if _feishu_inline_stream_progress and progress_queue is not None:
+                    progress_queue.put(str(message or ""))
                     return
                 safe_schedule_threadsafe(
                     _status_adapter.send(
@@ -18585,10 +18958,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 reset_current_session_key(_approval_session_token)
             result_holder[0] = result
 
-            # Signal the stream consumer that the agent is done
-            if _stream_consumer is not None:
-                _stream_consumer.finish()
-            
             # Return final response, or a message if something went wrong
             final_response = result.get("final_response")
 
@@ -18597,13 +18966,49 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _input_toks = 0
             _output_toks = 0
             _context_length = 0
+            _cache_read_toks = 0
+            _cache_write_toks = 0
             _agent = agent_holder[0]
             if _agent and hasattr(_agent, "context_compressor"):
                 _last_prompt_toks = getattr(_agent.context_compressor, "last_prompt_tokens", 0)
                 _input_toks = getattr(_agent, "session_prompt_tokens", 0)
                 _output_toks = getattr(_agent, "session_completion_tokens", 0)
                 _context_length = getattr(_agent.context_compressor, "context_length", 0) or 0
+                _cache_read_toks = getattr(_agent, "session_cache_read_tokens", 0) or 0
+                _cache_write_toks = getattr(_agent, "session_cache_write_tokens", 0) or 0
             _resolved_model = getattr(_agent, "model", None) if _agent else None
+
+            _feishu_stream_footer_line = ""
+            if _stream_consumer is not None and source.platform == Platform.FEISHU:
+                try:
+                    from gateway.runtime_footer import (
+                        format_feishu_stream_footer as _format_feishu_stream_footer,
+                        resolve_footer_config as _resolve_footer_config,
+                    )
+                    _footer_cfg = _resolve_footer_config(user_config, platform_key)
+                    if _footer_cfg.get("enabled"):
+                        _feishu_stream_footer_line = _format_feishu_stream_footer(
+                            status="出错" if result.get("failed") else "已完成",
+                            elapsed_seconds=time.monotonic() - _agent_run_started_at,
+                            input_tokens=_input_toks,
+                            output_tokens=_output_toks,
+                            cache_read_tokens=_cache_read_toks,
+                            cache_write_tokens=_cache_write_toks,
+                            context_tokens=_last_prompt_toks or _input_toks,
+                            context_length=_context_length or None,
+                            model=_resolved_model,
+                        )
+                        if _feishu_stream_footer_line:
+                            _stream_consumer.set_final_metadata(
+                                feishu_stream_footer=_feishu_stream_footer_line,
+                            )
+                except Exception as _footer_err:
+                    logger.debug("Feishu stream footer build failed: %s", _footer_err)
+
+            # Signal the stream consumer that the agent is done after final
+            # footer metadata has been attached.
+            if _stream_consumer is not None:
+                _stream_consumer.finish()
 
             # Sync session_id immediately after run_conversation(). Compression
             # can rotate before a follow-up model call fails; the failure return
@@ -18730,8 +19135,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "last_prompt_tokens": _last_prompt_toks,
                     "input_tokens": _input_toks,
                     "output_tokens": _output_toks,
+                    "cache_read_tokens": _cache_read_toks,
+                    "cache_write_tokens": _cache_write_toks,
                     "model": _resolved_model,
                     "context_length": _context_length,
+                    "feishu_stream_footer_embedded": bool(_feishu_stream_footer_line),
                 }
             
             # Scan tool results for MEDIA:<path> tags that need to be delivered
@@ -18836,6 +19244,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "last_prompt_tokens": _last_prompt_toks,
                 "input_tokens": _input_toks,
                 "output_tokens": _output_toks,
+                "cache_read_tokens": _cache_read_toks,
+                "cache_write_tokens": _cache_write_toks,
                 "model": _resolved_model,
                 "context_length": _context_length,
                 "session_id": effective_session_id,
@@ -18846,6 +19256,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # self-persisted (it didn't — see codex_runtime.py).  Default
                 # True preserves the skip-db behaviour for the standard runtime.
                 "agent_persisted": (result_holder[0].get("agent_persisted", True) if result_holder[0] else True),
+                "feishu_stream_footer_embedded": bool(_feishu_stream_footer_line),
             }
         
         # Start progress message sender if enabled. Gate on needs_progress_queue
@@ -18855,7 +19266,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # tool_progress:off user had the callback queue _thinking messages that
         # no task ever drained — so they silently never appeared.
         progress_task = None
-        if needs_progress_queue:
+        # Feishu inline streaming drains progress through the CardKit stream
+        # consumer. Starting the normal progress sender too would duplicate
+        # progress into separate platform messages.
+        if progress_queue is not None and not _feishu_inline_stream_progress:
             progress_task = asyncio.create_task(send_progress_messages())
 
         # Start the tool-call log writer when tool_progress == "log".
@@ -19077,6 +19491,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     else f"⏳ Working — {_elapsed_mins} min{_status_detail}"
                 )
                 try:
+                    if getattr(_notify_adapter, "SUPPRESSES_INTERIM_STATUS_MESSAGES", False) is True:
+                        continue
+                    if _feishu_inline_stream_progress and progress_queue is not None:
+                        progress_queue.put(("__replace_last__", _heartbeat_text))
+                        continue
                     _notify_res = None
                     if _heartbeat_msg_id:
                         try:

@@ -4510,6 +4510,217 @@ def _validate_critical_files_syntax(root) -> tuple[bool, str | None, str | None]
     return True, None, None
 
 
+def _resolve_update_patch_dir() -> Path:
+    """Return the directory containing local patches reapplied after update.
+
+    This is intentionally opt-in by presence: normal installs do nothing unless
+    the directory exists and contains ``*.patch`` files.  Operators with local
+    Hermes patches can keep them outside the git checkout so ``hermes update``
+    can pull upstream cleanly and then reapply the local overlay before the
+    gateway restarts.
+    """
+    env_value = os.environ.get("HERMES_UPDATE_PATCH_DIR", "").strip()
+    if env_value:
+        return Path(env_value).expanduser()
+
+    try:
+        from hermes_cli.config import load_config
+
+        updates_cfg = (load_config() or {}).get("updates", {})
+        if isinstance(updates_cfg, dict):
+            configured = str(updates_cfg.get("local_patch_dir", "") or "").strip()
+            if configured:
+                return Path(configured).expanduser()
+    except Exception as exc:
+        logger.debug("Could not read updates.local_patch_dir: %s", exc)
+
+    from hermes_constants import get_hermes_home
+
+    return get_hermes_home() / "update-patches"
+
+
+def _update_local_patches_enabled() -> bool:
+    """Return whether ``hermes update`` should reapply local patch overlays."""
+    try:
+        from hermes_cli.config import load_config
+
+        updates_cfg = (load_config() or {}).get("updates", {})
+        if isinstance(updates_cfg, dict):
+            value = updates_cfg.get("apply_local_patches", True)
+            if isinstance(value, str):
+                return value.strip().lower() not in {"0", "false", "no", "off"}
+            return bool(value)
+    except Exception as exc:
+        logger.debug("Could not read updates.apply_local_patches: %s", exc)
+    return True
+
+
+def _apply_update_local_patches(
+    git_cmd: list[str],
+    cwd: Path,
+    patch_dir: Path | None = None,
+) -> dict:
+    """Apply local ``*.patch`` overlays after a successful git update.
+
+    Returns counts for ``found``, ``applied``, and ``skipped``. Raises
+    RuntimeError when a patch cannot be applied cleanly.  The caller treats
+    that as an update failure so chat-driven updates never silently restart
+    into a build that dropped required local behavior.
+    """
+    if not _update_local_patches_enabled():
+        return {"found": 0, "applied": 0, "skipped": 0, "dir": None}
+
+    patch_root = Path(patch_dir) if patch_dir is not None else _resolve_update_patch_dir()
+    if not patch_root.is_dir():
+        return {"found": 0, "applied": 0, "skipped": 0, "dir": str(patch_root)}
+
+    patches = sorted(p for p in patch_root.glob("*.patch") if p.is_file())
+    if not patches:
+        return {"found": 0, "applied": 0, "skipped": 0, "dir": str(patch_root)}
+
+    applied = 0
+    skipped = 0
+    for patch_path in patches:
+        patch_arg = str(patch_path)
+
+        reverse_check = subprocess.run(
+            git_cmd + ["apply", "--reverse", "--check", "--whitespace=nowarn", patch_arg],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+        )
+        if reverse_check.returncode == 0:
+            skipped += 1
+            continue
+
+        check = subprocess.run(
+            git_cmd + ["apply", "--check", "--whitespace=nowarn", patch_arg],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+        )
+        apply_cmd = git_cmd + ["apply", "--whitespace=nowarn", patch_arg]
+
+        if check.returncode != 0:
+            three_way_check = subprocess.run(
+                git_cmd + ["apply", "--check", "--3way", "--whitespace=nowarn", patch_arg],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+            )
+            if three_way_check.returncode != 0:
+                detail = (
+                    three_way_check.stderr.strip()
+                    or check.stderr.strip()
+                    or three_way_check.stdout.strip()
+                    or check.stdout.strip()
+                    or "git apply --check failed"
+                )
+                raise RuntimeError(f"{patch_path.name}: {detail.splitlines()[0]}")
+            apply_cmd = git_cmd + ["apply", "--3way", "--whitespace=nowarn", patch_arg]
+
+        apply_result = subprocess.run(
+            apply_cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+        )
+        if apply_result.returncode != 0:
+            detail = (
+                apply_result.stderr.strip()
+                or apply_result.stdout.strip()
+                or "git apply failed"
+            )
+            raise RuntimeError(f"{patch_path.name}: {detail.splitlines()[0]}")
+        applied += 1
+
+    return {
+        "found": len(patches),
+        "applied": applied,
+        "skipped": skipped,
+        "dir": str(patch_root),
+    }
+
+
+def _revert_update_local_patches_if_applied(
+    git_cmd: list[str],
+    cwd: Path,
+    patch_dir: Path | None = None,
+) -> dict:
+    """Reverse already-applied local overlays before pulling upstream.
+
+    Local overlays intentionally live outside the git checkout and are applied
+    after each update. Reversing them before dirty-tree detection prevents the
+    updater from autostashing its own overlay and later restoring stale hunks
+    over newer upstream code.
+    """
+    if not _update_local_patches_enabled():
+        return {"found": 0, "reverted": 0, "dir": None}
+
+    patch_root = Path(patch_dir) if patch_dir is not None else _resolve_update_patch_dir()
+    if not patch_root.is_dir():
+        return {"found": 0, "reverted": 0, "dir": str(patch_root)}
+
+    patches = sorted((p for p in patch_root.glob("*.patch") if p.is_file()), reverse=True)
+    reverted = 0
+    for patch_path in patches:
+        patch_arg = str(patch_path)
+        reverse_check = subprocess.run(
+            git_cmd + ["apply", "--reverse", "--check", "--whitespace=nowarn", patch_arg],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+        )
+        if reverse_check.returncode != 0:
+            continue
+        reverse_result = subprocess.run(
+            git_cmd + ["apply", "--reverse", "--whitespace=nowarn", patch_arg],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+        )
+        if reverse_result.returncode == 0:
+            reverted += 1
+    return {"found": len(patches), "reverted": reverted, "dir": str(patch_root)}
+
+
+def _apply_update_local_patches_or_exit(git_cmd: list[str], cwd: Path) -> dict:
+    """Apply local update patches and terminate the update on failure."""
+    try:
+        patch_result = _apply_update_local_patches(git_cmd, cwd)
+        if patch_result["found"]:
+            print("→ Applying local update patches...")
+            if patch_result["applied"]:
+                print(f"  ✓ Applied {patch_result['applied']} patch(es)")
+            if patch_result["skipped"]:
+                print(f"  ✓ {patch_result['skipped']} patch(es) already applied")
+
+            syntax_ok, failing_path, syntax_error = _validate_critical_files_syntax(
+                cwd
+            )
+            if not syntax_ok:
+                print()
+                print("✗ Local update patches left a syntax error in a critical file:")
+                print(f"  {failing_path}")
+                if syntax_error:
+                    for line in str(syntax_error).splitlines()[:6]:
+                        print(f"    {line}")
+                print("  Disable with `hermes config set updates.apply_local_patches false`")
+                print(
+                    "  or fix the patches under "
+                    f"{patch_result.get('dir') or _resolve_update_patch_dir()}."
+                )
+                sys.exit(1)
+        return patch_result
+    except RuntimeError as patch_error:
+        print()
+        print("✗ Failed to apply local update patches.")
+        print(f"  {patch_error}")
+        print("  Disable with `hermes config set updates.apply_local_patches false`")
+        print("  or fix the patches and run `hermes update` again.")
+        sys.exit(1)
+
+
 def _gateway_prompt(prompt_text: str, default: str = "", timeout: float = 300.0) -> str:
     """File-based IPC prompt for gateway mode.
 
@@ -9478,6 +9689,21 @@ def _cmd_update_impl(args, gateway_mode: bool):
     if sys.platform == "win32":
         git_cmd = ["git", "-c", "windows.appendAtomically=false"]
 
+    try:
+        reverted_patches = _revert_update_local_patches_if_applied(
+            git_cmd,
+            PROJECT_ROOT,
+        )
+        local_patches_reverted_before_pull = bool(reverted_patches["reverted"])
+        if reverted_patches["reverted"]:
+            print(
+                "  ✓ Reverted "
+                f"{reverted_patches['reverted']} local update patch(es) before pull"
+            )
+    except Exception as exc:
+        logger.debug("Local update patch pre-revert failed: %s", exc)
+        local_patches_reverted_before_pull = False
+
     # Discard npm lockfile churn before any stash/branch logic. npm rewrites
     # tracked package-lock.json files non-deterministically at install/build
     # time (platform-specific optional deps, ideallyInert annotations, etc.),
@@ -9637,6 +9863,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     text=True,
                     check=False,
                 )
+            if local_patches_reverted_before_pull:
+                _apply_update_local_patches_or_exit(git_cmd, PROJECT_ROOT)
 
             # A current checkout does NOT imply a healthy install: a previous
             # dependency sync may have failed partway (classic on Windows,
@@ -9817,6 +10045,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     )
 
         _invalidate_update_cache()
+
+        _apply_update_local_patches_or_exit(git_cmd, PROJECT_ROOT)
 
         # Clear stale .pyc bytecode cache — prevents ImportError on gateway
         # restart when updated source references names that didn't exist in

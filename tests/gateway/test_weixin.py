@@ -13,7 +13,7 @@ from gateway.config import GatewayConfig, HomeChannel, Platform, _apply_env_over
 from gateway.platforms.base import SendResult
 from gateway.platforms.base import MessageEvent, MessageType
 from gateway.platforms import weixin
-from gateway.platforms.weixin import ContextTokenStore, WeixinAdapter
+from gateway.platforms.weixin import ContextTokenStore, MultiAccountWeixinAdapter, WeixinAdapter
 from tools.send_message_tool import _parse_target_ref, _send_to_platform
 
 
@@ -83,13 +83,13 @@ class TestWeixinFormatting:
 
 
 class TestWeixinChunking:
-    def test_split_text_splits_short_chatty_replies_into_separate_bubbles(self):
+    def test_split_text_keeps_short_chatty_replies_in_one_bubble_by_default(self):
         adapter = _make_adapter()
 
         content = adapter.format_message("第一行\n第二行\n第三行")
         chunks = adapter._split_text(content)
 
-        assert chunks == ["第一行", "第二行", "第三行"]
+        assert chunks == ["第一行\n第二行\n第三行"]
 
     def test_split_text_keeps_structured_table_block_together(self):
         adapter = _make_adapter()
@@ -181,6 +181,56 @@ class TestWeixinChunking:
         assert chunks == ["第一行", "第二行", "第三行"]
 
 
+class TestWeixinProcessingAck:
+    def _event(self, adapter: WeixinAdapter, text: str) -> MessageEvent:
+        return MessageEvent(
+            text=text,
+            message_type=MessageType.TEXT,
+            source=adapter.build_source(
+                chat_id="wxid_user1",
+                chat_type="dm",
+                user_id="wxid_user1",
+                user_name="wxid_user1",
+            ),
+        )
+
+    def test_send_processing_ack_sends_received_thinking_bubble(self):
+        adapter = _make_adapter()
+        adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="ack"))
+
+        asyncio.run(adapter.send_processing_ack(self._event(adapter, "hello"), "weixin:wxid_user1"))
+
+        adapter.send.assert_awaited_once_with(
+            chat_id="wxid_user1",
+            content="已收到，思考中",
+        )
+
+    def test_send_processing_ack_skips_slash_commands(self):
+        adapter = _make_adapter()
+        adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="ack"))
+
+        asyncio.run(adapter.send_processing_ack(self._event(adapter, "/new"), "weixin:wxid_user1"))
+
+        adapter.send.assert_not_awaited()
+
+    def test_send_processing_ack_can_be_disabled(self):
+        adapter = WeixinAdapter(
+            PlatformConfig(
+                enabled=True,
+                token="test-token",
+                extra={
+                    "account_id": "test-account",
+                    "processing_ack_enabled": False,
+                },
+            )
+        )
+        adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="ack"))
+
+        asyncio.run(adapter.send_processing_ack(self._event(adapter, "hello"), "weixin:wxid_user1"))
+
+        adapter.send.assert_not_awaited()
+
+
 class TestWeixinConfig:
     def test_apply_env_overrides_configures_weixin(self):
         config = GatewayConfig()
@@ -237,6 +287,56 @@ class TestWeixinConfig:
         )
 
         assert config.get_connected_platforms() == []
+
+    def test_multi_account_config_is_detected(self):
+        config = PlatformConfig(
+            enabled=True,
+            token="fallback-token",
+            extra={
+                "dm_policy": "open",
+                "accounts": [
+                    {"account_id": "acct-1", "token": "token-1"},
+                    {"account_id": "acct-2", "token": "token-2"},
+                ],
+            },
+        )
+
+        assert MultiAccountWeixinAdapter.is_multi_account_config(config) is True
+
+        adapter = MultiAccountWeixinAdapter(config)
+        assert [child._account_id for child in adapter._adapters] == ["acct-1", "acct-2"]
+        assert [child._token for child in adapter._adapters] == ["token-1", "token-2"]
+        assert all(child._dm_policy == "open" for child in adapter._adapters)
+
+    def test_multi_account_send_routes_by_context_token(self):
+        config = PlatformConfig(
+            enabled=True,
+            extra={
+                "accounts": [
+                    {"account_id": "acct-1", "token": "token-1"},
+                    {"account_id": "acct-2", "token": "token-2"},
+                ],
+            },
+        )
+        adapter = MultiAccountWeixinAdapter(config)
+        first, second = adapter._adapters
+        first._running = True
+        second._running = True
+        first._token_store.get = Mock(return_value=None)
+        second._token_store.get = Mock(return_value="ctx-2")
+        first.send = AsyncMock(return_value=SendResult(success=True, message_id="first"))
+        second.send = AsyncMock(return_value=SendResult(success=True, message_id="second"))
+
+        result = asyncio.run(adapter.send("wxid_user", "hello"))
+
+        assert result.message_id == "second"
+        first.send.assert_not_awaited()
+        second.send.assert_awaited_once_with(
+            "wxid_user",
+            "hello",
+            reply_to=None,
+            metadata=None,
+        )
 
 
 class TestWeixinStatePersistence:
@@ -1205,3 +1305,53 @@ class TestWeixinApiTimeout:
             )
         )
         assert result == {"ret": 0, "msgs": [], "get_updates_buf": "buf-123"}
+
+class TestWeixinDirectSendRouting:
+    def test_parse_im_wechat_dm_as_explicit_target(self):
+        chat_id, thread_id, explicit = _parse_target_ref(
+            "weixin", "o9cq80ynfnHRgsGcDgRTGFnK5eBA@im.wechat"
+        )
+
+        assert chat_id == "o9cq80ynfnHRgsGcDgRTGFnK5eBA@im.wechat"
+        assert thread_id is None
+        assert explicit is True
+
+    def test_direct_send_selects_account_with_context_token(self, tmp_path, monkeypatch):
+        from gateway.platforms.weixin import send_weixin_direct
+
+        target = "o9cq80ynfnHRgsGcDgRTGFnK5eBA@im.wechat"
+        store = ContextTokenStore(str(tmp_path))
+        store.set("acct-2", target, "ctx-token")
+        monkeypatch.setattr(weixin, "get_hermes_home", lambda: tmp_path)
+
+        seen = {}
+
+        async def fake_send(self, chat_id, content, reply_to=None, metadata=None):
+            seen["account_id"] = self._account_id
+            seen["token"] = self._token
+            seen["chat_id"] = chat_id
+            seen["content"] = content
+            return SendResult(success=True, message_id="m1")
+
+        monkeypatch.setattr(WeixinAdapter, "send", fake_send)
+
+        result = asyncio.run(send_weixin_direct(
+            extra={
+                "accounts": [
+                    {"account_id": "acct-1", "token": "token-1"},
+                    {"account_id": "acct-2", "token": "token-2"},
+                ],
+            },
+            token=None,
+            chat_id=target,
+            message="hello",
+        ))
+
+        assert result["success"] is True
+        assert result["context_token_used"] is True
+        assert seen == {
+            "account_id": "acct-2",
+            "token": "token-2",
+            "chat_id": target,
+            "content": "hello",
+        }

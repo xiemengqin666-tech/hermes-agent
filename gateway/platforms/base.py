@@ -3171,6 +3171,16 @@ class BasePlatformAdapter(ABC):
         """
         pass
 
+    async def send_processing_ack(self, event: MessageEvent, session_key: str) -> None:
+        """Send an immediate "received, working" acknowledgement if desired.
+
+        Most platforms either have native typing indicators or editable
+        progress cards.  Adapters can override this for platforms such as
+        Weixin where the user expects an explicit first bubble before a long
+        final response.
+        """
+        del event, session_key
+
     async def stop_typing(self, chat_id: str) -> None:
         """Stop a persistent typing indicator (if the platform uses one).
 
@@ -4854,6 +4864,16 @@ class BasePlatformAdapter(ABC):
         
         try:
             await self._run_processing_hook("on_processing_start", event)
+            try:
+                await self.send_processing_ack(event, session_key)
+            except Exception as ack_err:
+                logger.debug(
+                    "[%s] processing ack failed for %s: %s",
+                    self.name,
+                    event.source.chat_id,
+                    ack_err,
+                    exc_info=True,
+                )
 
             # Call the handler (this can take a while with tool calls)
             response = await self._message_handler(event)

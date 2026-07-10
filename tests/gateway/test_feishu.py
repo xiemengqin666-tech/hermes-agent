@@ -186,7 +186,7 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
 
-        adapter = FeishuAdapter(PlatformConfig())
+        adapter = FeishuAdapter(PlatformConfig(extra={"flat_replies": False}))
         runner = AsyncMock()
         site = AsyncMock()
         web_module = SimpleNamespace(
@@ -220,7 +220,7 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
 
-        adapter = FeishuAdapter(PlatformConfig())
+        adapter = FeishuAdapter(PlatformConfig(extra={"flat_replies": False}))
         ws_client = SimpleNamespace()
 
         with (
@@ -275,7 +275,7 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
 
-        adapter = FeishuAdapter(PlatformConfig())
+        adapter = FeishuAdapter(PlatformConfig(extra={"flat_replies": False}))
 
         # Real thread loop to schedule the close coroutine on.
         ws_thread_loop = asyncio.new_event_loop()
@@ -499,12 +499,261 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
             json.dumps({"text": "可以用 粗体 和 斜体。"}, ensure_ascii=False),
         )
 
+    @patch.dict(os.environ, {"HERMES_FEISHU_CARDKIT_STREAMING": "false"}, clear=True)
+    def test_streaming_edit_keeps_original_text_message_type_for_markdown(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        captured = {"created": None, "updated": None}
+
+        class _MessageAPI:
+            def create(self, request):
+                captured["created"] = request
+                return SimpleNamespace(
+                    success=lambda: True,
+                    data=SimpleNamespace(message_id="om_stream"),
+                )
+
+            def update(self, request):
+                captured["updated"] = request
+                return SimpleNamespace(success=lambda: True)
+
+        adapter._client = SimpleNamespace(
+            im=SimpleNamespace(
+                v1=SimpleNamespace(
+                    message=_MessageAPI(),
+                )
+            )
+        )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch("plugins.platforms.feishu.adapter.asyncio.to_thread", side_effect=_direct):
+            send_result = asyncio.run(
+                adapter.send(
+                    chat_id="oc_chat",
+                    content="Working",
+                    metadata={"expect_edits": True},
+                )
+            )
+            edit_result = asyncio.run(
+                adapter.edit_message(
+                    chat_id="oc_chat",
+                    message_id="om_stream",
+                    content="Working with **bold** markdown",
+                )
+            )
+
+        self.assertTrue(send_result.success)
+        self.assertTrue(edit_result.success)
+        self.assertEqual(captured["created"].request_body.msg_type, "text")
+        self.assertEqual(captured["updated"].request_body.msg_type, "text")
+        self.assertEqual(
+            captured["updated"].request_body.content,
+            json.dumps({"text": "Working with **bold** markdown"}, ensure_ascii=False),
+        )
+
+    @patch.dict(os.environ, {"HERMES_FEISHU_CARDKIT_STREAMING": "false"}, clear=True)
+    def test_gateway_stream_consumer_edits_feishu_preview_message(self):
+        from gateway.config import PlatformConfig
+        from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        captured = {"created": None, "updated": None}
+
+        class _MessageAPI:
+            def create(self, request):
+                captured["created"] = request
+                return SimpleNamespace(
+                    success=lambda: True,
+                    data=SimpleNamespace(message_id="om_stream"),
+                )
+
+            def update(self, request):
+                captured["updated"] = request
+                return SimpleNamespace(success=lambda: True)
+
+        adapter._client = SimpleNamespace(
+            im=SimpleNamespace(
+                v1=SimpleNamespace(
+                    message=_MessageAPI(),
+                )
+            )
+        )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        async def _run_stream():
+            consumer = GatewayStreamConsumer(
+                adapter=adapter,
+                chat_id="oc_chat",
+                config=StreamConsumerConfig(cursor=" ▉"),
+            )
+            await consumer._send_or_edit("Working ▉")
+            await consumer._send_or_edit("Working with **bold** markdown", finalize=True)
+            return consumer
+
+        with patch("plugins.platforms.feishu.adapter.asyncio.to_thread", side_effect=_direct):
+            consumer = asyncio.run(_run_stream())
+
+        self.assertTrue(consumer.already_sent)
+        self.assertTrue(consumer.final_response_sent)
+        self.assertEqual(captured["created"].request_body.msg_type, "text")
+        self.assertEqual(captured["updated"].message_id, "om_stream")
+        self.assertEqual(captured["updated"].request_body.msg_type, "text")
+        self.assertEqual(
+            captured["updated"].request_body.content,
+            json.dumps({"text": "Working with **bold** markdown"}, ensure_ascii=False),
+        )
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_streaming_send_uses_cardkit_content_updates(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        captured = {
+            "card_create": None,
+            "message_create": None,
+            "content_updates": [],
+            "card_update": None,
+            "settings": None,
+        }
+
+        class _CardAPI:
+            def create(self, request):
+                captured["card_create"] = request
+                return SimpleNamespace(
+                    success=lambda: True,
+                    data=SimpleNamespace(card_id="card_stream"),
+                )
+
+            def update(self, request):
+                captured["card_update"] = request
+                return SimpleNamespace(success=lambda: True)
+
+            def settings(self, request):
+                captured["settings"] = request
+                return SimpleNamespace(success=lambda: True)
+
+        class _CardElementAPI:
+            def content(self, request):
+                captured["content_updates"].append(request)
+                return SimpleNamespace(success=lambda: True)
+
+        class _MessageAPI:
+            def create(self, request):
+                captured["message_create"] = request
+                return SimpleNamespace(
+                    success=lambda: True,
+                    data=SimpleNamespace(message_id="om_card_stream"),
+                )
+
+            def reply(self, request):
+                raise AssertionError("Default flat Feishu streams must use im.message.create")
+
+            def update(self, request):
+                raise AssertionError("CardKit stream must not use im.message.update")
+
+        adapter._client = SimpleNamespace(
+            cardkit=SimpleNamespace(
+                v1=SimpleNamespace(card=_CardAPI(), card_element=_CardElementAPI())
+            ),
+            im=SimpleNamespace(v1=SimpleNamespace(message=_MessageAPI())),
+        )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch("plugins.platforms.feishu.adapter.asyncio.to_thread", side_effect=_direct):
+            send_result = asyncio.run(
+                adapter.send(
+                    chat_id="oc_chat",
+                    content="星巴克",
+                    reply_to="om_user",
+                    metadata={"expect_edits": True, "thread_id": "topic_1"},
+                )
+            )
+            edit_result = asyncio.run(
+                adapter.edit_message(
+                    chat_id="oc_chat",
+                    message_id="om_card_stream",
+                    content="思考中\n\n最近进度\n• 📚 skill_view\n\n回复\n星巴克在线",
+                )
+            )
+            edit_result_2 = asyncio.run(
+                adapter.edit_message(
+                    chat_id="oc_chat",
+                    message_id="om_card_stream",
+                    content="思考中\n\n最近进度\n• 📚 skill_view\n\n回复\n星巴克在线，第二段",
+                )
+            )
+            final_result = asyncio.run(
+                adapter.edit_message(
+                    chat_id="oc_chat",
+                    message_id="om_card_stream",
+                    content="思考中\n\n最近进度\n• 📚 skill_view · python3 - <<'PY'\n\n回复\n星巴克在线，第二段",
+                    finalize=True,
+                    metadata={
+                        "feishu_stream_footer": (
+                            "已完成 · 耗时 8.3s · 输入 19k 输出 145 · "
+                            "缓存 18k/1k (94%) · 上下文 19k/200k (10%) · claude-3-7-sonnet"
+                        )
+                    },
+                )
+            )
+
+        self.assertTrue(send_result.success)
+        self.assertTrue(edit_result.success)
+        self.assertTrue(edit_result_2.success)
+        self.assertTrue(final_result.success)
+        self.assertEqual(send_result.message_id, "om_card_stream")
+        self.assertEqual(captured["message_create"].receive_id_type, "chat_id")
+        self.assertEqual(captured["message_create"].request_body.receive_id, "oc_chat")
+        self.assertEqual(captured["message_create"].request_body.msg_type, "interactive")
+        self.assertIn("card_stream", captured["message_create"].request_body.content)
+        create_payload = json.loads(captured["card_create"].request_body.data)
+        create_elements = create_payload["body"]["elements"]
+        self.assertGreaterEqual(len(create_elements), 3)
+        self.assertEqual(create_elements[0]["content"], "**思考中**")
+        self.assertEqual(create_elements[1]["element_id"], "streaming_progress")
+        self.assertEqual(create_elements[2]["element_id"], "streaming_content")
+        self.assertEqual(len(captured["content_updates"]), 3)
+        updates_by_element = {
+            request.element_id: request.request_body.content
+            for request in captured["content_updates"][:2]
+        }
+        self.assertIn("streaming_progress", updates_by_element)
+        self.assertIn("streaming_content", updates_by_element)
+        self.assertIn("📚 skill_view", updates_by_element["streaming_progress"])
+        self.assertIn("最近进度", updates_by_element["streaming_progress"])
+        self.assertNotIn("思考中", updates_by_element["streaming_progress"])
+        self.assertEqual(updates_by_element["streaming_content"], "星巴克在线")
+        self.assertNotIn("最近进度", updates_by_element["streaming_content"])
+        self.assertNotIn("已完成 · 耗时", updates_by_element["streaming_content"])
+        self.assertEqual(captured["content_updates"][2].element_id, "streaming_content")
+        self.assertEqual(captured["content_updates"][2].request_body.content, "星巴克在线，第二段")
+        self.assertIsNotNone(captured["card_update"])
+        update_payload = captured["card_update"].request_body.card.data
+        self.assertNotIn("```", update_payload)
+        self.assertNotIn("📚 skill_view", update_payload)
+        self.assertNotIn("python3 - <<'PY'", update_payload)
+        self.assertNotIn("最近进度", update_payload)
+        self.assertIn("星巴克在线，第二段", update_payload)
+        self.assertIn("已完成 · 耗时 8.3s", update_payload)
+        self.assertIn('"text_size": "notation"', update_payload)
+        self.assertIsNotNone(captured["settings"])
+
     @patch.dict(os.environ, {}, clear=True)
     def test_get_chat_info_uses_real_feishu_chat_api(self):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
 
-        adapter = FeishuAdapter(PlatformConfig())
+        adapter = FeishuAdapter(PlatformConfig(extra={"flat_replies": False}))
 
         class _ChatAPI:
             def get(self, request):
@@ -659,7 +908,7 @@ class TestAdapterBehavior(unittest.TestCase):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
 
-        adapter = FeishuAdapter(PlatformConfig())
+        adapter = FeishuAdapter(PlatformConfig(extra={"flat_replies": False}))
         calls = []
 
         class _Builder:
@@ -741,7 +990,7 @@ class TestAdapterBehavior(unittest.TestCase):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
 
-        adapter = FeishuAdapter(PlatformConfig())
+        adapter = FeishuAdapter(PlatformConfig(extra={"flat_replies": False}))
         adapter._loop = object()
 
         for emoji in ("Typing", "CrossMark"):
@@ -2040,7 +2289,7 @@ class TestAdapterBehavior(unittest.TestCase):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
 
-        adapter = FeishuAdapter(PlatformConfig())
+        adapter = FeishuAdapter(PlatformConfig(extra={"flat_replies": False}))
         captured = {}
 
         class _ReplyAPI:
@@ -2081,7 +2330,7 @@ class TestAdapterBehavior(unittest.TestCase):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
 
-        adapter = FeishuAdapter(PlatformConfig())
+        adapter = FeishuAdapter(PlatformConfig(extra={"flat_replies": False}))
         captured = {}
 
         class _MessageAPI:
@@ -2208,7 +2457,7 @@ class TestAdapterBehavior(unittest.TestCase):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
 
-        adapter = FeishuAdapter(PlatformConfig())
+        adapter = FeishuAdapter(PlatformConfig(extra={"flat_replies": False}))
         captured = {}
 
         class _FileAPI:
@@ -3738,8 +3987,8 @@ class TestBotNameResolution(unittest.TestCase):
 
 @unittest.skipUnless(_HAS_LARK_OAPI, "lark-oapi not installed")
 class TestProcessingReactions(unittest.TestCase):
-    """Typing on start → removed on SUCCESS, swapped for CrossMark on FAILURE,
-    removed (no replacement) on CANCELLED."""
+    """Typing reaction is shown while running, then replaced with a terminal
+    reaction on SUCCESS/FAILURE/CANCELLED."""
 
     @staticmethod
     def _run(coro):
@@ -3805,62 +4054,81 @@ class TestProcessingReactions(unittest.TestCase):
 
     # ------------------------------------------------------------------ start
     @patch.dict(os.environ, {}, clear=True)
-    def test_start_adds_typing_and_caches_reaction_id(self):
+    def test_start_adds_typing_reaction_by_default(self):
         adapter, tracker = self._build_adapter(next_reaction_id="r_typing")
         with self._patch_to_thread():
             self._run(adapter.on_processing_start(self._event()))
         self.assertEqual(tracker.create_calls, ["Typing"])
         self.assertEqual(adapter._pending_processing_reactions["om_msg"], "r_typing")
 
-    @patch.dict(os.environ, {}, clear=True)
+    @patch.dict(os.environ, {"FEISHU_REACTION_IN_PROGRESS": "Hourglass"}, clear=True)
+    def test_start_adds_configured_reaction_and_caches_reaction_id(self):
+        adapter, tracker = self._build_adapter(next_reaction_id="r_typing")
+        with self._patch_to_thread():
+            self._run(adapter.on_processing_start(self._event()))
+        self.assertEqual(tracker.create_calls, ["Hourglass"])
+        self.assertEqual(adapter._pending_processing_reactions["om_msg"], "r_typing")
+
+    @patch.dict(os.environ, {"FEISHU_REACTION_IN_PROGRESS": "Hourglass"}, clear=True)
     def test_start_is_idempotent_for_same_message_id(self):
         adapter, tracker = self._build_adapter(next_reaction_id="r_typing")
         with self._patch_to_thread():
             self._run(adapter.on_processing_start(self._event()))
             self._run(adapter.on_processing_start(self._event()))
-        self.assertEqual(tracker.create_calls, ["Typing"])
+        self.assertEqual(tracker.create_calls, ["Hourglass"])
 
-    @patch.dict(os.environ, {}, clear=True)
+    @patch.dict(os.environ, {"FEISHU_REACTION_IN_PROGRESS": "Hourglass"}, clear=True)
     def test_start_does_not_cache_when_create_fails(self):
         adapter, tracker = self._build_adapter(create_success=False)
         with self._patch_to_thread():
             self._run(adapter.on_processing_start(self._event()))
-        self.assertEqual(tracker.create_calls, ["Typing"])
+        self.assertEqual(tracker.create_calls, ["Hourglass"])
         self.assertNotIn("om_msg", adapter._pending_processing_reactions)
 
     # --------------------------------------------------------------- complete
-    @patch.dict(os.environ, {}, clear=True)
-    def test_success_removes_typing_and_adds_nothing(self):
+    @patch.dict(os.environ, {"FEISHU_REACTION_IN_PROGRESS": "Hourglass"}, clear=True)
+    def test_success_removes_start_reaction_and_adds_done(self):
         adapter, tracker = self._build_adapter(next_reaction_id="r_typing")
         with self._patch_to_thread():
             self._run(adapter.on_processing_start(self._event()))
             self._run(
                 adapter.on_processing_complete(self._event(), ProcessingOutcome.SUCCESS)
             )
-        self.assertEqual(tracker.create_calls, ["Typing"])
+        self.assertEqual(tracker.create_calls, ["Hourglass", "DONE"])
         self.assertEqual(tracker.delete_calls, ["r_typing"])
         self.assertNotIn("om_msg", adapter._pending_processing_reactions)
 
-    @patch.dict(os.environ, {}, clear=True)
-    def test_failure_removes_typing_then_adds_cross_mark(self):
+    @patch.dict(os.environ, {"FEISHU_REACTION_SUCCESS": "CheckMark"}, clear=True)
+    def test_success_uses_configured_done_reaction(self):
+        adapter, tracker = self._build_adapter(next_reaction_id="r_typing")
+        with self._patch_to_thread():
+            self._run(adapter.on_processing_start(self._event()))
+            self._run(
+                adapter.on_processing_complete(self._event(), ProcessingOutcome.SUCCESS)
+            )
+        self.assertEqual(tracker.create_calls, ["Typing", "CheckMark"])
+        self.assertEqual(tracker.delete_calls, ["r_typing"])
+
+    @patch.dict(os.environ, {"FEISHU_REACTION_IN_PROGRESS": "Hourglass"}, clear=True)
+    def test_failure_removes_start_reaction_then_adds_cross_mark(self):
         adapter, tracker = self._build_adapter(next_reaction_id="r_typing")
         with self._patch_to_thread():
             self._run(adapter.on_processing_start(self._event()))
             self._run(
                 adapter.on_processing_complete(self._event(), ProcessingOutcome.FAILURE)
             )
-        self.assertEqual(tracker.create_calls, ["Typing", "CrossMark"])
+        self.assertEqual(tracker.create_calls, ["Hourglass", "CrossMark"])
         self.assertEqual(tracker.delete_calls, ["r_typing"])
 
-    @patch.dict(os.environ, {}, clear=True)
-    def test_cancelled_removes_typing_and_adds_nothing(self):
+    @patch.dict(os.environ, {"FEISHU_REACTION_IN_PROGRESS": "Hourglass"}, clear=True)
+    def test_cancelled_removes_start_reaction_and_adds_bomb(self):
         adapter, tracker = self._build_adapter(next_reaction_id="r_typing")
         with self._patch_to_thread():
             self._run(adapter.on_processing_start(self._event()))
             self._run(
                 adapter.on_processing_complete(self._event(), ProcessingOutcome.CANCELLED)
             )
-        self.assertEqual(tracker.create_calls, ["Typing"])
+        self.assertEqual(tracker.create_calls, ["Hourglass", "BOMB"])
         self.assertEqual(tracker.delete_calls, ["r_typing"])
         self.assertNotIn("om_msg", adapter._pending_processing_reactions)
 
@@ -3875,19 +4143,33 @@ class TestProcessingReactions(unittest.TestCase):
         self.assertEqual(tracker.delete_calls, [])
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_success_without_preceding_start_is_full_noop(self):
+    def test_success_without_preceding_start_still_adds_done(self):
         adapter, tracker = self._build_adapter()
         with self._patch_to_thread():
             self._run(
                 adapter.on_processing_complete(self._event(), ProcessingOutcome.SUCCESS)
             )
-        self.assertEqual(tracker.create_calls, [])
+        self.assertEqual(tracker.create_calls, ["DONE"])
         self.assertEqual(tracker.delete_calls, [])
 
     # ------------------------- delete failure: don't stack badges -----------
     @patch.dict(os.environ, {}, clear=True)
-    def test_delete_failure_on_failure_outcome_skips_cross_mark(self):
-        # Removing Typing is best-effort — but if it fails, we must NOT
+    def test_failure_without_start_reaction_still_adds_cross_mark(self):
+        adapter, tracker = self._build_adapter(
+            next_reaction_id="r_typing", delete_success=False,
+        )
+        with self._patch_to_thread():
+            self._run(adapter.on_processing_start(self._event()))
+            self._run(
+                adapter.on_processing_complete(self._event(), ProcessingOutcome.FAILURE)
+        )
+        self.assertEqual(tracker.create_calls, ["Typing"])
+        self.assertEqual(tracker.delete_calls, ["r_typing"])
+        self.assertEqual(adapter._pending_processing_reactions["om_msg"], "r_typing")
+
+    @patch.dict(os.environ, {"FEISHU_REACTION_IN_PROGRESS": "Hourglass"}, clear=True)
+    def test_delete_failure_on_failure_outcome_skips_cross_mark_with_start_reaction(self):
+        # Removing the start reaction is best-effort — but if it fails, we must NOT
         # additionally add CrossMark, or the UI would show two contradictory
         # badges. The handle stays in the cache for LRU to clean up later.
         adapter, tracker = self._build_adapter(
@@ -3898,13 +4180,13 @@ class TestProcessingReactions(unittest.TestCase):
             self._run(
                 adapter.on_processing_complete(self._event(), ProcessingOutcome.FAILURE)
             )
-        self.assertEqual(tracker.create_calls, ["Typing"])  # CrossMark NOT added
+        self.assertEqual(tracker.create_calls, ["Hourglass"])  # CrossMark NOT added
         self.assertEqual(tracker.delete_calls, ["r_typing"])  # delete was attempted
         self.assertEqual(
             adapter._pending_processing_reactions["om_msg"], "r_typing",
         )  # handle retained
 
-    @patch.dict(os.environ, {}, clear=True)
+    @patch.dict(os.environ, {"FEISHU_REACTION_IN_PROGRESS": "Hourglass"}, clear=True)
     def test_delete_failure_on_success_outcome_retains_handle(self):
         adapter, tracker = self._build_adapter(
             next_reaction_id="r_typing", delete_success=False,
@@ -3914,7 +4196,7 @@ class TestProcessingReactions(unittest.TestCase):
             self._run(
                 adapter.on_processing_complete(self._event(), ProcessingOutcome.SUCCESS)
             )
-        self.assertEqual(tracker.create_calls, ["Typing"])
+        self.assertEqual(tracker.create_calls, ["Hourglass"])
         self.assertEqual(tracker.delete_calls, ["r_typing"])
         self.assertEqual(
             adapter._pending_processing_reactions["om_msg"], "r_typing",
@@ -3933,7 +4215,7 @@ class TestProcessingReactions(unittest.TestCase):
         self.assertEqual(tracker.delete_calls, [])
 
     # ------------------------------------------------------------- LRU bounds
-    @patch.dict(os.environ, {}, clear=True)
+    @patch.dict(os.environ, {"FEISHU_REACTION_IN_PROGRESS": "Hourglass"}, clear=True)
     def test_cache_evicts_oldest_entry_beyond_size_limit(self):
         from plugins.platforms.feishu.adapter import _FEISHU_PROCESSING_REACTION_CACHE_SIZE
 
