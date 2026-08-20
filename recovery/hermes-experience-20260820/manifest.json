@@ -1,0 +1,21 @@
+{
+  "snapshot": "2026-08-20",
+  "hermes": {
+    "version": "0.20.4",
+    "base_commit": "e02d1e41fc6104187e20af9eac8b2820566e3508"
+  },
+  "runtime_patch": {
+    "path": "patches/0001-runtime-experience.patch",
+    "sha256": "e8cb07c7059558ad01a53b1e471f070b9b54092f5b37b667049a0a5be63794de",
+    "file_count": 21
+  },
+  "feishu_stream": {
+    "repository": "https://github.com/ColinLu50/openclaw-lark-stream.git",
+    "commit": "8d89a01b0057411c1d005f71dbcd70ef2b5c3687",
+    "wrapper_version": "260330.1.2"
+  },
+  "luckin_skill": {
+    "version": "2.0.0"
+  },
+  "secrets_included": false
+}
