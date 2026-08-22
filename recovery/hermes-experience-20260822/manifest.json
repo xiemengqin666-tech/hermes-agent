@@ -2,7 +2,7 @@
   "snapshot": "2026-08-22",
   "hermes": {
     "version": "0.20.5",
-    "base_commit": "3cc7f220cdd2e38f50e3caa05782259c3d3c0cde"
+    "base_commit": "8286c46502e1f59eafdfabcf5af998024f64dfb8"
   },
   "runtime_patch": {
     "path": "patches/0001-runtime-experience.patch",

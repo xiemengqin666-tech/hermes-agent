@@ -1,6 +1,6 @@
-45e8a35dae7ad1889c2959f705c7a163528a46105afaf4dadec1f54534cb694f  ./README.md
+91e0ed8c88e8d8dc8c9073e5fc91f72bbf4d24e2382df591060881ce8ad81971  ./README.md
 fb7952e0dbd5212e4a404b73517bdaeaf68e7296104acb7905781c82b48a15c4  ./config/feishu.example.yaml
-bcd8bc420fa43f1e36a819caf3c48e8b05fd804b003f03f976e9e3cca2978406  ./manifest.json
+130713e6d930f83d537b4635cfda3f1d46a9e063c1df828f90c16eb54d0ddfa5  ./manifest.json
 27d3df60ca7db3474ed5b53f0dcc0de82cecab02fe46a538c85a89d5445a48d7  ./patches/0001-runtime-experience.patch
 053d86cb7623a1bd3f91f1114a4ff0514e19af5fcd7bfb672ac867be6a7c6f50  ./plugins/openclaw-lark-stream/UPSTREAM_COMMIT
 19048a27ba95864cb455b1dc6116c7cedaf4237b16c66be081cbe17d934bcf34  ./plugins/openclaw-lark-stream/UPSTREAM_REPOSITORY
