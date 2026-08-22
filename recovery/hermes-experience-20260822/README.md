@@ -1,7 +1,7 @@
 # Hermes experience recovery snapshot
 
 This secret-free snapshot preserves the Feishu messaging behavior and Luckin
-ordering workflow used on this machine on 2026-08-20.
+ordering workflow used on this machine on 2026-08-22.
 
 ## Contents
 
@@ -19,7 +19,7 @@ ordering workflow used on this machine on 2026-08-20.
 
 ## Pinned baseline
 
-- Hermes: `v0.20.4` / commit `e02d1e41fc6104187e20af9eac8b2820566e3508`
+- Hermes: `v0.20.5` / commit `7d6db4efb885856078e4d19f804035226df81e0d`
 - Feishu stream source: `ColinLu50/openclaw-lark-stream` commit
   `8d89a01b0057411c1d005f71dbcd70ef2b5c3687`
 - Luckin skill: `2.0.0`
@@ -62,6 +62,9 @@ restart manually with `hermes gateway restart` at an appropriate time.
   store or order ID.
 - `/update` preserves and reapplies the canonical patch, updates companion CLIs,
   and performs readiness checks without using a stale gateway process.
+- All live agents, planning calls, API defaults, and inherited cron jobs use
+  `gpt-5.6-sol`. Historical usage records may still name older models, but no
+  executable configuration may select `gpt-5.3-codex-spark`.
 
 ## Security
 

@@ -1,7 +1,7 @@
-22758cf85266e8111682a632a45295aa7bfc9f7e147a22c7d3d24b5d12b56d5f  ./README.md
+877d08b1eda51cf46d97ffa37fff2bccbcd43ee349be50204692e315f437eccb  ./README.md
 fb7952e0dbd5212e4a404b73517bdaeaf68e7296104acb7905781c82b48a15c4  ./config/feishu.example.yaml
-10dfbe96f8744299a075d29b1c75f8f80032c0365eb4ac58f103025a4ea07dd6  ./manifest.json
-e8cb07c7059558ad01a53b1e471f070b9b54092f5b37b667049a0a5be63794de  ./patches/0001-runtime-experience.patch
+440dbdf07d6a7250943011eed1b7a8c2e680f715620eea6ca5f88940d739312f  ./manifest.json
+27d3df60ca7db3474ed5b53f0dcc0de82cecab02fe46a538c85a89d5445a48d7  ./patches/0001-runtime-experience.patch
 053d86cb7623a1bd3f91f1114a4ff0514e19af5fcd7bfb672ac867be6a7c6f50  ./plugins/openclaw-lark-stream/UPSTREAM_COMMIT
 19048a27ba95864cb455b1dc6116c7cedaf4237b16c66be081cbe17d934bcf34  ./plugins/openclaw-lark-stream/UPSTREAM_REPOSITORY
 8483285a5871fc3e1a23414d54cdeaa7146dbe582ab35324b576f1b298e0cee1  ./plugins/openclaw-lark-stream/__init__.py
@@ -20,4 +20,4 @@ ae69d0d3874b5cf628b3fd96fecc8a4197d80c9c2eb4a88b70f671f0f81b58c2  ./skills/lucki
 262048dafafa1aea86e7c06c3502317c48efd8d9420aa7d05ec7d5c9841f8161  ./skills/luckin-cli-ordering/scripts/create_luckin_order_fast.py
 97c6c0e2bf2230f136c900f0c180b5f903ff944ade2dffb5a2357fd03249e5b3  ./skills/luckin-cli-ordering/scripts/watch_luckin_order.py
 4d83cd0fa91219bc25b12f11c9020a9a92acc784fbd25ce8ad65cf9f8c6f3afb  ./skills/luckin-cli-ordering/tests/test_delivery_manifest.py
-63f89d5a6fb12e821b1026ee0bc055640284270a0423d5988abe0aa3bcf61793  ./verify.sh
+3eb7a8912dcd10a0c5cbd137b9b9ee46ba1f3813bfa128e37383245c201c435a  ./verify.sh

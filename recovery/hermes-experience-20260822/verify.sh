@@ -39,6 +39,7 @@ if "$PYTHON" -c 'import pytest' >/dev/null 2>&1; then
     "$HERMES_REPO/tests/gateway/test_feishu.py"
     "$HERMES_REPO/tests/gateway/test_weixin.py"
     "$HERMES_REPO/tests/gateway/test_update_command.py"
+    "$HERMES_REPO/tests/gateway/test_stream_consumer.py"
     "$HERMES_REPO/tests/hermes_cli/test_update_wedged_gateway.py"
     "$HERMES_REPO/tests/agent/test_account_usage.py"
     "$SKILL_DIR/tests/test_delivery_manifest.py"

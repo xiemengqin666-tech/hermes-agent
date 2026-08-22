@@ -1,12 +1,12 @@
 {
-  "snapshot": "2026-08-20",
+  "snapshot": "2026-08-22",
   "hermes": {
-    "version": "0.20.4",
-    "base_commit": "e02d1e41fc6104187e20af9eac8b2820566e3508"
+    "version": "0.20.5",
+    "base_commit": "7d6db4efb885856078e4d19f804035226df81e0d"
   },
   "runtime_patch": {
     "path": "patches/0001-runtime-experience.patch",
-    "sha256": "e8cb07c7059558ad01a53b1e471f070b9b54092f5b37b667049a0a5be63794de",
+    "sha256": "27d3df60ca7db3474ed5b53f0dcc0de82cecab02fe46a538c85a89d5445a48d7",
     "file_count": 21
   },
   "feishu_stream": {
