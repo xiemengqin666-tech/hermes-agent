@@ -19,7 +19,7 @@ ordering workflow used on this machine on 2026-08-22.
 
 ## Pinned baseline
 
-- Hermes: `v0.20.5` / commit `7d6db4efb885856078e4d19f804035226df81e0d`
+- Hermes: `v0.20.5` / commit `3cc7f220cdd2e38f50e3caa05782259c3d3c0cde`
 - Feishu stream source: `ColinLu50/openclaw-lark-stream` commit
   `8d89a01b0057411c1d005f71dbcd70ef2b5c3687`
 - Luckin skill: `2.0.0`
