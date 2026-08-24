@@ -18,7 +18,7 @@ compatible with the official updater.
 ## Pinned baseline
 
 - Hermes: `v0.20.5` / commit
-  `608a56ed7f50926ecfae1db39447b280a0bc4d1e`
+  `c584d15cdc31e1ebf3989c426ed05fb2ddb0c9fc`
 - Runtime patch SHA-256:
   `b32c1bf75c2417a7ae58ecaa8f441ad579793e6f51c99548379f19aff2e91c06`
 - Feishu stream source: `ColinLu50/openclaw-lark-stream` commit
