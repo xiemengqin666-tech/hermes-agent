@@ -1,0 +1,40 @@
+{
+  "snapshot": "2026-08-24",
+  "hermes": {
+    "version": "0.20.5",
+    "base_commit": "608a56ed7f50926ecfae1db39447b280a0bc4d1e"
+  },
+  "runtime_patch": {
+    "path": "patches/0001-runtime-experience.patch",
+    "sha256": "b32c1bf75c2417a7ae58ecaa8f441ad579793e6f51c99548379f19aff2e91c06",
+    "file_count": 15,
+    "previous_file_count": 21
+  },
+  "feishu_stream": {
+    "repository": "https://github.com/ColinLu50/openclaw-lark-stream.git",
+    "commit": "8d89a01b0057411c1d005f71dbcd70ef2b5c3687",
+    "wrapper_version": "260330.1.2"
+  },
+  "luckin_skill": {
+    "version": "2.0.0"
+  },
+  "codex_alignment": {
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "high",
+    "max_turns": 200,
+    "delegation_max_iterations": 250,
+    "delegation_max_concurrent_children": 10,
+    "service_tier": "normal",
+    "browser_executable": "Microsoft Edge"
+  },
+  "removed_skills": [
+    "ponytail",
+    "plan",
+    "requesting-code-review",
+    "subagent-driven-development",
+    "systematic-debugging",
+    "test-driven-development",
+    "writing-plans"
+  ],
+  "secrets_included": false
+}
