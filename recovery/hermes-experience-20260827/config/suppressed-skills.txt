@@ -1,0 +1,6 @@
+plan
+requesting-code-review
+subagent-driven-development
+systematic-debugging
+test-driven-development
+writing-plans
