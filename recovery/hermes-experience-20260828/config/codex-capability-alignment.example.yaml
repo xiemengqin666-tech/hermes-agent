@@ -1,0 +1,53 @@
+# Merge these values into each Hermes profile. Keep credentials in .env.
+model:
+  default: gpt-5.6-sol
+  provider: openai-codex
+
+agent:
+  max_turns: 200
+  service_tier: normal
+  disabled_toolsets: []
+  reasoning_effort: high
+
+compression:
+  enabled: true
+  threshold: 0.75
+  target_ratio: 0.2
+
+auxiliary:
+  compression:
+    provider: openai-codex
+    model: gpt-5.6-sol
+  title_generation:
+    provider: openai-codex
+    model: gpt-5.6-sol
+  triage_specifier:
+    provider: openai-codex
+    model: gpt-5.6-sol
+  kanban_decomposer:
+    provider: openai-codex
+    model: gpt-5.6-sol
+
+delegation:
+  provider: openai-codex
+  model: gpt-5.6-sol
+  max_iterations: 250
+  reasoning_effort: high
+  max_concurrent_children: 10
+  inherit_mcp_toolsets: true
+  subagent_auto_approve: true
+
+goals:
+  max_turns: 200
+
+approvals:
+  mode: 'off'
+
+browser:
+  # Hermes calls its CDP-compatible engine "chrome" even when Edge is pinned.
+  engine: chrome
+
+# Required .env values for every profile:
+# HERMES_BROWSER_EDGE_ONLY=true
+# PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+# AGENT_BROWSER_EXECUTABLE_PATH=/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge

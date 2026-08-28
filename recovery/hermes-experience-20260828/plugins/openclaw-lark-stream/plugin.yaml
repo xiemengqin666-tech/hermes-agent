@@ -1,0 +1,20 @@
+name: openclaw-lark-stream
+label: Feishu / Lark Stream
+kind: platform
+version: 260330.1.2
+description: >
+  Hermes compatibility wrapper for the GitHub openclaw-lark-stream package.
+  The upstream package is an OpenClaw Node channel plugin; this wrapper makes
+  it visible and enableable in Hermes while preserving Hermes' Feishu adapter.
+author: ColinLu50 / local Hermes wrapper
+requires_env:
+  - name: FEISHU_APP_ID
+    description: "Feishu/Lark app ID"
+    prompt: "Feishu App ID"
+    url: "https://open.feishu.cn/"
+    password: false
+  - name: FEISHU_APP_SECRET
+    description: "Feishu/Lark app secret"
+    prompt: "Feishu App Secret"
+    url: "https://open.feishu.cn/"
+    password: true

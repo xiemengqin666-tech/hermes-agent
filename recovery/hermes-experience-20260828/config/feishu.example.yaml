@@ -1,0 +1,28 @@
+# Shape-only example. Do not commit real IDs or secrets.
+platforms:
+  feishu:
+    enabled: true
+    extra:
+      flat_replies: true
+      reply_threads_as_sessions: false
+      reply_context_chars: 12000
+      require_mention: false
+      reply_mode: streaming
+      cardkit_streaming: true
+      openclaw_lark_stream_style: true
+      accounts:
+        - name: primary
+          app_id: "<FEISHU_APP_ID_PRIMARY>"
+          app_secret_env: FEISHU_APP_SECRET_PRIMARY
+          domain: feishu
+          connection_mode: websocket
+        - name: second-account
+          app_id: "<FEISHU_APP_ID_SECONDARY>"
+          app_secret_env: FEISHU_APP_SECRET_SECONDARY
+          domain: feishu
+          connection_mode: websocket
+
+plugins:
+  enabled:
+    - openclaw-lark-stream
+    - platforms/feishu
