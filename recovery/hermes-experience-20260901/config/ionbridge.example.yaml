@@ -1,0 +1,9 @@
+# Secret-free shape only. Keep the real device URL in local config.yaml.
+mcp_servers:
+  ionbridge:
+    url: https://mcp.thecandysign.com/<DEVICE_ID>/<MCP_TOKEN>/sse
+    transport: sse
+    timeout: 180
+    connect_timeout: 30
+    sampling:
+      enabled: false
