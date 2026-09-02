@@ -1,0 +1,61 @@
+{
+  "snapshot": "2026-09-02",
+  "hermes": {
+    "version": "0.21.0",
+    "base_commit": "f98f5e74e00e54c36088fa2e78171e2a408ba7c9"
+  },
+  "runtime_patch": {
+    "path": "patches/0001-runtime-experience.patch",
+    "sha256": "1efb56ad8a1b94808984e6b810b37cb0669900f69dd0e9270d0025a7b382e443",
+    "file_count": 16,
+    "previous_file_count": 15
+  },
+  "feishu_stream": {
+    "repository": "https://github.com/ColinLu50/openclaw-lark-stream.git",
+    "commit": "8d89a01b0057411c1d005f71dbcd70ef2b5c3687",
+    "wrapper_version": "260330.1.2"
+  },
+  "luckin_skill": {
+    "version": "2.0.0"
+  },
+  "ionbridge_skill": {
+    "version": "3.0",
+    "device_name": "小电拼 0305",
+    "mcp_server": "ionbridge",
+    "device_url_included": false
+  },
+  "companion_clis": {
+    "codex": "0.151.0",
+    "lark": "1.0.92",
+    "claude_code": "2.1.252",
+    "agent_browser": "0.35.2",
+    "agent_wechat": "0.12.0",
+    "openspec": "1.11.0",
+    "openspec_playwright": "0.3.82",
+    "opencli": "1.8.7"
+  },
+  "codex_alignment": {
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "high",
+    "max_turns": 200,
+    "delegation_max_iterations": 250,
+    "delegation_max_concurrent_children": 10,
+    "service_tier": "normal",
+    "browser_executable": "Microsoft Edge"
+  },
+  "content_assistant": {
+    "compression_threshold": 0.6,
+    "terminal_outcome_controls_done_reaction": true,
+    "imported_lark_doc_alias": "openclaw-lark-doc"
+  },
+  "removed_skills": [
+    "ponytail",
+    "plan",
+    "requesting-code-review",
+    "subagent-driven-development",
+    "systematic-debugging",
+    "test-driven-development",
+    "writing-plans"
+  ],
+  "secrets_included": false
+}
