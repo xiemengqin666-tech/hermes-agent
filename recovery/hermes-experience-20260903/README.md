@@ -8,13 +8,15 @@ tested Git baseline instead of relying on a cross-version autostash.
 
 - `patches/0001-runtime-experience-f98f5e7.patch`: current-runtime overlay for
   Feishu, Weixin, `/update`, usage accounting, cron compatibility, and tests.
-- `patches/0002-runtime-experience-c3e9b28.patch`: reduced overlay reconciled and
+- `patches/0002-runtime-experience-05f548f.patch`: reduced overlay reconciled and
   tested against the latest upstream commit available during this audit.
 - `plugins/openclaw-lark-stream/`: pinned Feishu stream wrapper and source.
 - `plugins/weixin-experience/`: Weixin single-message and durable Luckin flow.
 - `skills/luckin-cli-ordering/`: deterministic Luckin ordering workflow.
 - `scripts/normalize_workspace_rules.py`: removes legacy browser and manual
   skill-ledger rules from connector workflows.
+- `scripts/normalize_profile_settings.py`: keeps every profile on the verified
+  model, reasoning, session-reset, approval, and Edge-only settings.
 - `scripts/normalize_cron_jobs.py`: verifies or restores cron delivery,
   tool-budget, and single-card guardrails without storing chat IDs.
 - `skills/ai-news-workflow/`: corrected single-card AI-news workflow.
@@ -28,15 +30,15 @@ tested Git baseline instead of relying on a cross-version autostash.
 
 ## Tested baselines
 
-- Current runtime: `v0.21.0` / commit
+- Legacy rollback baseline: `v0.21.0` / commit
   `f98f5e74e00e54c36088fa2e78171e2a408ba7c9`; patch SHA-256
   `76d9ad46d4bb9d1fd54d04d67e2006e8cd3171b883fe2ffc654cc0d7d0cd08a8`.
-- Latest reconciled upstream: commit
-  `c3e9b28a4214fef7136d4b854beb1904941962bb`; patch SHA-256
-  `6d6a0c38e6433bf6a854361c2354a9b8ed91d2d6efa1b85bf8cb24f476122107`.
-- Companion CLIs: Codex `0.151.0`, Lark `1.0.92`, Claude Code `2.1.252`,
-  agent-browser `0.35.2`, Agent WeChat `0.12.0`, OpenSpec `1.11.0`,
-  openspec-playwright `0.3.82`, and OpenCLI `1.8.7`.
+- Current and latest reconciled upstream: commit
+  `05f548f35dd3242bf2ff74743e9112acde251f77`; patch SHA-256
+  `453b98a16dedee06604f9023c808d6d4a35e8e8d17242cdb8ecde5264894b323`.
+- Companion CLIs: Codex `0.153.0`, Lark `1.0.93`, Claude Code `2.1.259`,
+  agent-browser `0.36.0`, Agent WeChat `0.12.0`, OpenSpec `1.12.0`,
+  openspec-playwright `0.3.84`, and OpenCLI `1.8.7`.
 - Feishu stream source: `ColinLu50/openclaw-lark-stream` commit
   `8d89a01b0057411c1d005f71dbcd70ef2b5c3687`
 - Weixin experience plugin: `1.1.1`
@@ -59,7 +61,7 @@ are never overwritten.
 Do not run `/update` from the old `f98f5e7` working tree and assume autostash
 will preserve the experience: the upstream Feishu adapter changed enough for
 stash restoration to conflict. Upgrade through a controlled baseline switch,
-then apply the matching `c3e9b28` overlay and run `verify.sh` before restarting
+then apply the matching `05f548f` overlay and run `verify.sh` before restarting
 the gateway.
 
 ## Preserved behavior
@@ -82,9 +84,12 @@ the gateway.
 - Legacy workspace rules no longer force browser/image searches or a manual
   skill-usage terminal call during Luckin ordering.
 - `/update` uses official autostash and also checks companion CLIs without
-  updating the live Feishu stream plugin or downloading Chromium.
+  updating the live Feishu stream plugin or downloading Chromium. The
+  companion updater is bound before the source checkout so the same `/update`
+  invocation can finish after Hermes replaces its working tree.
 - All agents use `gpt-5.6-sol`, high reasoning, normal service tier, and Edge
-  browser execution. Fast mode remains disabled.
+  browser execution. Fast mode remains disabled, and automatic idle/daily
+  session resets remain disabled for the default and collaboration profiles.
 - Ponytail and Superpowers-derived skills are removed. Hermes' native
   `.curator_suppressed` mechanism prevents them from returning after updates.
 - AI 小电拼 Mirror is available as `ionbridge` in the default agent and all

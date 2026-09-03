@@ -6,7 +6,7 @@ HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 HERMES_REPO="${HERMES_REPO:-$HERMES_HOME/hermes-agent}"
 PATCHES=(
   "$ROOT/patches/0001-runtime-experience-f98f5e7.patch"
-  "$ROOT/patches/0002-runtime-experience-c3e9b28.patch"
+  "$ROOT/patches/0002-runtime-experience-05f548f.patch"
 )
 PLUGIN_SOURCE="$ROOT/plugins/openclaw-lark-stream"
 PLUGIN_DIR="$HERMES_HOME/plugins/openclaw-lark-stream"
@@ -136,6 +136,7 @@ fi
 
 PYTHON="$HERMES_REPO/venv/bin/python"
 [[ -x "$PYTHON" ]] || PYTHON="$(command -v python3)"
+"$PYTHON" "$ROOT/scripts/normalize_profile_settings.py" --home "$HERMES_HOME"
 if [[ -f "$HERMES_HOME/cron/jobs.json" ]]; then
   HERMES_HOME="$HERMES_HOME" PYTHONPATH="$HERMES_REPO" \
     "$PYTHON" "$ROOT/scripts/normalize_cron_jobs.py" \

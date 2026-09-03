@@ -2059,26 +2059,32 @@ index 0000000000..23b2c54876
 +        print(f"  ⚠ Companion CLI update incomplete: {exc}")
 +        return []
 diff --git a/hermes_cli/update_cmd.py b/hermes_cli/update_cmd.py
-index 05a4e11669..1873e8d7d0 100644
+index 05a4e11669..f5f2ebfc7a 100644
 --- a/hermes_cli/update_cmd.py
 +++ b/hermes_cli/update_cmd.py
-@@ -9043,6 +9043,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
+@@ -36,6 +36,9 @@ from datetime import datetime
+ from pathlib import Path
+ from typing import Optional
+ 
++from hermes_cli.companion_cli_updates import (
++    maybe_update_companion_clis as _maybe_update_companion_clis,
++)
+ from hermes_cli.config import get_hermes_home
+ from hermes_constants import get_default_hermes_root, venv_python_path
+ 
+@@ -9043,6 +9046,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                      "long-lived processes still use the previous runtime."
                  )
                  print("  Restart each of them to pick up the repaired runtime.")
-+            from hermes_cli.companion_cli_updates import maybe_update_companion_clis
-+
-+            maybe_update_companion_clis(gateway_mode)
++            _maybe_update_companion_clis(gateway_mode)
              _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
              # Git is current, but a prior pull may still owe the fleet a
              # restart (#95294). Catch up even on the "Already up to date"
-@@ -9729,6 +9732,10 @@ def _cmd_update_impl(args, gateway_mode: bool):
+@@ -9729,6 +9733,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
              pre_update_snapshot_id=pre_update_snapshot_id,
          )
  
-+        from hermes_cli.companion_cli_updates import maybe_update_companion_clis
-+
-+        maybe_update_companion_clis(gateway_mode)
++        _maybe_update_companion_clis(gateway_mode)
 +
          update_complete = _print_update_summary(
              node_failures=node_failures,
@@ -3680,20 +3686,22 @@ index 936fef0f3e..f740bb65b7 100644
 -
 diff --git a/tests/hermes_cli/test_companion_cli_updates.py b/tests/hermes_cli/test_companion_cli_updates.py
 new file mode 100644
-index 0000000000..85f0ba45ae
+index 0000000000..cbd7d7b077
 --- /dev/null
 +++ b/tests/hermes_cli/test_companion_cli_updates.py
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,97 @@
 +"""Regression tests for chat-triggered companion CLI updates."""
 +
 +from __future__ import annotations
 +
 +import json
 +import subprocess
++import sys
 +from pathlib import Path
 +from unittest.mock import Mock, patch
 +
 +from hermes_cli import companion_cli_updates as companion
++from hermes_cli import update_cmd
 +
 +
 +def test_discover_outdated_npm_clis_keeps_only_real_cli_packages(tmp_path: Path):
@@ -3770,6 +3778,15 @@ index 0000000000..85f0ba45ae
 +        assert companion.maybe_update_companion_clis(gateway_mode=False) == []
 +
 +    update.assert_not_called()
++
++
++def test_update_pipeline_keeps_companion_callable_across_checkout(monkeypatch):
++    """The running updater must retain its helper after source replacement."""
++    bound = update_cmd._maybe_update_companion_clis
++    monkeypatch.delitem(sys.modules, "hermes_cli.companion_cli_updates")
++
++    with patch.object(companion, "companion_cli_updates_enabled", return_value=False):
++        assert bound(gateway_mode=True) == []
 diff --git a/tools/delegate_tool.py b/tools/delegate_tool.py
 index 796487f041..8f0858600f 100644
 --- a/tools/delegate_tool.py

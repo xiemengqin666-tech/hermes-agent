@@ -14,6 +14,9 @@ compression:
   threshold: 0.75
   target_ratio: 0.2
 
+session_reset:
+  mode: none
+
 auxiliary:
   compression:
     provider: openai-codex

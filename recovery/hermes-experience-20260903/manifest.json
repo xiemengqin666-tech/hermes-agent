@@ -2,8 +2,9 @@
   "snapshot": "2026-09-03",
   "hermes": {
     "version": "0.21.0",
-    "current_base_commit": "f98f5e74e00e54c36088fa2e78171e2a408ba7c9",
-    "latest_tested_base_commit": "c3e9b28a4214fef7136d4b854beb1904941962bb"
+    "legacy_base_commit": "f98f5e74e00e54c36088fa2e78171e2a408ba7c9",
+    "current_base_commit": "05f548f35dd3242bf2ff74743e9112acde251f77",
+    "latest_tested_base_commit": "05f548f35dd3242bf2ff74743e9112acde251f77"
   },
   "runtime_patches": [
     {
@@ -13,9 +14,9 @@
       "file_count": 18
     },
     {
-      "path": "patches/0002-runtime-experience-c3e9b28.patch",
-      "base_commit": "c3e9b28a4214fef7136d4b854beb1904941962bb",
-      "sha256": "6d6a0c38e6433bf6a854361c2354a9b8ed91d2d6efa1b85bf8cb24f476122107",
+      "path": "patches/0002-runtime-experience-05f548f.patch",
+      "base_commit": "05f548f35dd3242bf2ff74743e9112acde251f77",
+      "sha256": "453b98a16dedee06604f9023c808d6d4a35e8e8d17242cdb8ecde5264894b323",
       "file_count": 16
     }
   ],
@@ -46,13 +47,13 @@
     "device_url_included": false
   },
   "companion_clis": {
-    "codex": "0.151.0",
-    "lark": "1.0.92",
-    "claude_code": "2.1.252",
-    "agent_browser": "0.35.2",
+    "codex": "0.153.0",
+    "lark": "1.0.93",
+    "claude_code": "2.1.259",
+    "agent_browser": "0.36.0",
     "agent_wechat": "0.12.0",
-    "openspec": "1.11.0",
-    "openspec_playwright": "0.3.82",
+    "openspec": "1.12.0",
+    "openspec_playwright": "0.3.84",
     "opencli": "1.8.7"
   },
   "codex_alignment": {
