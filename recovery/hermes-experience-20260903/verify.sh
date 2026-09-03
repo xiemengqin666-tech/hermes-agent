@@ -123,7 +123,7 @@ if "$PYTHON" -c 'import pytest' >/dev/null 2>&1; then
   if [[ -f "$HERMES_HOME/plugins/weixin-experience/tests/test_luckin_qr_recovery.py" ]]; then
     TESTS+=("$HERMES_HOME/plugins/weixin-experience/tests/test_luckin_qr_recovery.py")
   fi
-  PYTEST_ARGS=()
+  PYTEST_ARGS=(-q)
   if grep -Fq 'test_concurrent_dedup_persists_land_in_order' \
     "$HERMES_REPO/tests/gateway/test_feishu.py" 2>/dev/null; then
     # This upstream test clears HOME/HERMES_HOME and consequently reads the
@@ -138,7 +138,7 @@ if "$PYTHON" -c 'import pytest' >/dev/null 2>&1; then
   (
     cd "$HERMES_REPO"
     HERMES_HOME="$TEST_HOME" PYTHONPATH="$HERMES_REPO" \
-      "$PYTHON" -m pytest -q "${PYTEST_ARGS[@]}" "${TESTS[@]}"
+      "$PYTHON" -m pytest "${PYTEST_ARGS[@]}" "${TESTS[@]}"
   )
 else
   printf 'pytest is unavailable; syntax and integrity checks passed.\n'

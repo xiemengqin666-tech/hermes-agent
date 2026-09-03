@@ -33,4 +33,4 @@ ae69d0d3874b5cf628b3fd96fecc8a4197d80c9c2eb4a88b70f671f0f81b58c2  ./skills/lucki
 ac31303352da26d389124ddc3fac658bd7c049279d6e39a076ce4fe45db21fb7  ./skills/luckin-cli-ordering/scripts/prepare_luckin_order_fast.py
 97c6c0e2bf2230f136c900f0c180b5f903ff944ade2dffb5a2357fd03249e5b3  ./skills/luckin-cli-ordering/scripts/watch_luckin_order.py
 7e4cd8dece45ccf76b563e567639d7ba135310779fffbe45375d19ad7c2ee913  ./skills/luckin-cli-ordering/tests/test_delivery_manifest.py
-55bc2146882e2c09bf77dee8043776f0b425a06b3df82c29ed6edc99ff9c0fde  ./verify.sh
+dfed80e5c1e263eddb3729e166e35a7eb708e53fe59ea5a0b91fc1d5ea1f6c30  ./verify.sh
