@@ -1,0 +1,9 @@
+name: weixin-experience
+label: Weixin Experience
+kind: platform
+version: 1.1.0
+description: >
+  Local Hermes Weixin compatibility layer for multi-account routing,
+  immediate processing acknowledgement, single-message delivery, and
+  model-guided durable Luckin ordering.
+author: local
