@@ -2,14 +2,23 @@
   "snapshot": "2026-09-03",
   "hermes": {
     "version": "0.21.0",
-    "base_commit": "f98f5e74e00e54c36088fa2e78171e2a408ba7c9"
+    "current_base_commit": "f98f5e74e00e54c36088fa2e78171e2a408ba7c9",
+    "latest_tested_base_commit": "c3e9b28a4214fef7136d4b854beb1904941962bb"
   },
-  "runtime_patch": {
-    "path": "patches/0001-runtime-experience.patch",
-    "sha256": "1efb56ad8a1b94808984e6b810b37cb0669900f69dd0e9270d0025a7b382e443",
-    "file_count": 16,
-    "previous_file_count": 15
-  },
+  "runtime_patches": [
+    {
+      "path": "patches/0001-runtime-experience-f98f5e7.patch",
+      "base_commit": "f98f5e74e00e54c36088fa2e78171e2a408ba7c9",
+      "sha256": "76d9ad46d4bb9d1fd54d04d67e2006e8cd3171b883fe2ffc654cc0d7d0cd08a8",
+      "file_count": 18
+    },
+    {
+      "path": "patches/0002-runtime-experience-c3e9b28.patch",
+      "base_commit": "c3e9b28a4214fef7136d4b854beb1904941962bb",
+      "sha256": "6d6a0c38e6433bf6a854361c2354a9b8ed91d2d6efa1b85bf8cb24f476122107",
+      "file_count": 16
+    }
+  ],
   "feishu_stream": {
     "repository": "https://github.com/ColinLu50/openclaw-lark-stream.git",
     "commit": "8d89a01b0057411c1d005f71dbcd70ef2b5c3687",
@@ -59,6 +68,13 @@
     "compression_threshold": 0.6,
     "terminal_outcome_controls_done_reaction": true,
     "imported_lark_doc_alias": "openclaw-lark-doc"
+  },
+  "cron": {
+    "expected_jobs": 10,
+    "active_jobs": 9,
+    "intentionally_paused_jobs": ["14d8a7a546c5"],
+    "failure_delivery_derived_locally": true,
+    "chat_ids_included": false
   },
   "removed_skills": [
     "ponytail",

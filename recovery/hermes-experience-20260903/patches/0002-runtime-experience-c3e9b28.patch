@@ -26,91 +26,11 @@ index b7abb18017..523ea28592 100644
          count = int(banked)
          plural = "s" if count != 1 else ""
          details.append(
-diff --git a/cron/scheduler.py b/cron/scheduler.py
-index 6580427a6e..e7c63f03a6 100644
---- a/cron/scheduler.py
-+++ b/cron/scheduler.py
-@@ -7322,7 +7322,8 @@ def _run_one_job_body(
- 
-             # Deliver the final response to the origin/target chat.
-             # If the agent responded with [SILENT], skip delivery (but
--            # output is already saved above).  Failed jobs always deliver.
-+            # output is already saved above). Failed jobs deliver by default;
-+            # operators can keep them local with cron.deliver_failures=false.
-             #
-             # Exception: a run blocked by pre-dispatch config validation
-             # (T1-26) alerts exactly ONCE — the silent marker means the
-@@ -7359,36 +7360,24 @@ def _run_one_job_body(
-                     "This alert is sent once; the job stays blocked until "
-                     "the configuration is fixed."
-                 )
-+            elif success:
-+                deliver_content = final_response
-             else:
--                if success:
--                    deliver_content = final_response
--                else:
--                    # Durable failure incident: record this job+error
--                    # signature once and, when the operator already acked it,
--                    # suppress the per-run failure ping (the streak nudge and
--                    # the failure summarizer stay intact for un-acked
--                    # failures). Best-effort — an incident-store error never
--                    # breaks the delivery path (see _upsert_incident_for_failure).
--                    incident_acked, failure_incident_id = _upsert_incident_for_failure(
--                        job, error or "", output_file=output_file
--                    )
--                    if incident_acked and not drift_skip:
--                        deliver_content = ""
--                    else:
--                        deliver_content = (
--                            _summarize_cron_failure_for_delivery(job, error)
--                            + _failure_streak_nudge(job)
--                        )
--                if drift_skip and not success:
--                    # Drift-skip alert: bypass the generic summarizer's
--                    # 180-char truncation (it would eat the remediation
--                    # command) and strip the internal marker — deliver the
--                    # guard's own actionable message intact.
--                    # Deliberately NOT gated on incident ack: a drift skip
--                    # means the run was never attempted and the message
--                    # carries the remediation command — acking the failure
--                    # signature silences failure pings, not drift alerts
--                    # (which already alert once via the drift_alerted marker).
-+                # Preserve upstream incident tracking even when operators
-+                # choose not to receive per-run failure notifications.
-+                incident_acked, failure_incident_id = _upsert_incident_for_failure(
-+                    job, error or "", output_file=output_file
-+                )
-+                cron_config = load_config().get("cron") or {}
-+                deliver_failures = (
-+                    not isinstance(cron_config, dict)
-+                    or cron_config.get("deliver_failures", True) is not False
-+                )
-+                if not deliver_failures or (incident_acked and not drift_skip):
-+                    deliver_content = ""
-+                elif drift_skip:
-+                    # Drift alerts carry the remediation command and follow
-+                    # their own alert-once marker rather than incident ack.
-                     _drift_text = re.sub(
-                         r"\[drift_skip[^\]]*\]\s*", "", str(error)
-                     ).strip()
-@@ -7396,6 +7385,11 @@ def _run_one_job_body(
-                         f"⚠️ Cron '{job.get('name') or job['id']}' skipped: "
-                         f"{_drift_text}"
-                     )
-+                else:
-+                    deliver_content = (
-+                        _summarize_cron_failure_for_delivery(job, error)
-+                        + _failure_streak_nudge(job)
-+                    )
-             # Treat whitespace-only final responses the same as empty
-             # responses: do not deliver a blank message, and let the
-             # empty-response guard below mark the run as a soft failure.
 diff --git a/gateway/platforms/base.py b/gateway/platforms/base.py
-index 3ad1ea18d4..81424fa20b 100644
+index d2ac5996e6..d6f8def143 100644
 --- a/gateway/platforms/base.py
 +++ b/gateway/platforms/base.py
-@@ -3609,6 +3609,17 @@ class BasePlatformAdapter(ABC):
+@@ -3725,6 +3725,17 @@ class BasePlatformAdapter(ABC):
          surfaces the first failure per (platform, context) at warning level and
          downgrades subsequent failures to debug.
          """
@@ -128,7 +48,7 @@ index 3ad1ea18d4..81424fa20b 100644
          try:
              from gateway.status import write_runtime_status
              # Multiplexed secondary adapters share the process-level runtime
-@@ -5021,6 +5032,22 @@ class BasePlatformAdapter(ABC):
+@@ -5156,6 +5167,22 @@ class BasePlatformAdapter(ABC):
              text = f"{caption}\n{text}"
          return await self.send(chat_id=chat_id, content=text, reply_to=reply_to, metadata=metadata)
  
@@ -151,7 +71,7 @@ index 3ad1ea18d4..81424fa20b 100644
      @staticmethod
      def validate_media_delivery_path(path: str, session_key: str = "") -> Optional[str]:
          """Return a resolved path if it is safe for native attachment upload."""
-@@ -5616,6 +5643,10 @@ class BasePlatformAdapter(ABC):
+@@ -5751,6 +5778,10 @@ class BasePlatformAdapter(ABC):
      async def on_processing_start(self, event: MessageEvent) -> None:
          """Hook called when background processing begins."""
  
@@ -162,7 +82,7 @@ index 3ad1ea18d4..81424fa20b 100644
      async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
          """Hook called when background processing completes.
  
-@@ -6536,6 +6567,16 @@ class BasePlatformAdapter(ABC):
+@@ -6671,6 +6702,16 @@ class BasePlatformAdapter(ABC):
          
          try:
              await self._run_processing_hook("on_processing_start", event)
@@ -179,7 +99,7 @@ index 3ad1ea18d4..81424fa20b 100644
  
              # Call the handler (this can take a while with tool calls)
              response = await self._message_handler(event)
-@@ -6754,6 +6795,38 @@ class BasePlatformAdapter(ABC):
+@@ -6889,6 +6930,38 @@ class BasePlatformAdapter(ABC):
                          except OSError:
                              pass
  
@@ -218,7 +138,7 @@ index 3ad1ea18d4..81424fa20b 100644
                  # Send the text portion. A reconnect may have replaced this
                  # adapter while its in-flight handler was still producing a
                  # final response; that response is a new message, so resolve
-@@ -6812,12 +6885,49 @@ class BasePlatformAdapter(ABC):
+@@ -6947,12 +7020,49 @@ class BasePlatformAdapter(ABC):
                          except Exception:
                              logger.debug("delivery ledger record failed", exc_info=True)
                              _obligation_id = None
@@ -274,7 +194,7 @@ index 3ad1ea18d4..81424fa20b 100644
                      _record_delivery(result)
                      if _obligation_id is not None:
                          try:
-@@ -7036,8 +7146,20 @@ class BasePlatformAdapter(ABC):
+@@ -7171,8 +7281,20 @@ class BasePlatformAdapter(ABC):
                          self.name, len(_response_pre_extract), event.source.chat_id,
                      )
  
@@ -296,7 +216,7 @@ index 3ad1ea18d4..81424fa20b 100644
              # Clean up the per-turn streaming-TTS flag (#60671).
              self._streaming_tts_completed_turns.discard(
                  self._streaming_tts_turn_key(
-@@ -7050,7 +7172,7 @@ class BasePlatformAdapter(ABC):
+@@ -7185,7 +7307,7 @@ class BasePlatformAdapter(ABC):
              await self._run_processing_hook(
                  "on_processing_complete",
                  event,
@@ -306,10 +226,10 @@ index 3ad1ea18d4..81424fa20b 100644
  
              # The active drain owns debounce state. If a queue-mode timer has
 diff --git a/gateway/platforms/weixin.py b/gateway/platforms/weixin.py
-index 8c2b18b765..b349a6a2ee 100644
+index be698e4f71..656efb559d 100644
 --- a/gateway/platforms/weixin.py
 +++ b/gateway/platforms/weixin.py
-@@ -603,7 +603,15 @@ async def _upload_ciphertext(
+@@ -618,7 +618,15 @@ async def _upload_ciphertext(
                  raise RuntimeError(f"CDN upload missing x-encrypted-param header: {raw[:200]}")
              raw = await response.text()
              raise RuntimeError(f"CDN upload HTTP {response.status}: {raw[:200]}")
@@ -326,7 +246,7 @@ index 8c2b18b765..b349a6a2ee 100644
  
  
  async def _download_bytes(
-@@ -764,6 +772,82 @@ def _wrap_copy_friendly_lines_for_weixin(content: str) -> str:
+@@ -779,6 +787,82 @@ def _wrap_copy_friendly_lines_for_weixin(content: str) -> str:
      return "\n".join(wrapped).strip()
  
  
@@ -409,7 +329,7 @@ index 8c2b18b765..b349a6a2ee 100644
  def _split_markdown_blocks(content: str) -> List[str]:
      if not content:
          return []
-@@ -1242,6 +1326,17 @@ class WeixinAdapter(BasePlatformAdapter):
+@@ -1257,6 +1341,17 @@ class WeixinAdapter(BasePlatformAdapter):
              or os.getenv("WEIXIN_SPLIT_MULTILINE_MESSAGES"),
              default=False,
          )
@@ -427,7 +347,7 @@ index 8c2b18b765..b349a6a2ee 100644
  
          # Text debounce batching (mirrors Telegram adapter pattern).
          # iLink delivers messages individually, so rapid multi-message
-@@ -1977,6 +2072,15 @@ class WeixinAdapter(BasePlatformAdapter):
+@@ -1992,6 +2087,15 @@ class WeixinAdapter(BasePlatformAdapter):
              logger.error("[%s] send failed to=%s: %s", self.name, _safe_id(chat_id), exc)
              return SendResult(success=False, error=str(exc))
  
@@ -443,7 +363,7 @@ index 8c2b18b765..b349a6a2ee 100644
      async def _ensure_typing_ticket(self, chat_id: str) -> Optional[str]:
          """Return a valid typing ticket, refreshing from getConfig if expired.
  
-@@ -2092,6 +2196,43 @@ class WeixinAdapter(BasePlatformAdapter):
+@@ -2107,6 +2211,43 @@ class WeixinAdapter(BasePlatformAdapter):
              metadata=metadata,
          )
  
@@ -487,7 +407,7 @@ index 8c2b18b765..b349a6a2ee 100644
      async def send_document(
          self,
          chat_id: str,
-@@ -2239,38 +2380,70 @@ class WeixinAdapter(BasePlatformAdapter):
+@@ -2254,38 +2395,70 @@ class WeixinAdapter(BasePlatformAdapter):
              item_kwargs["bits_per_sample"] = 16
          media_item = item_builder(**item_kwargs)
  
@@ -584,7 +504,7 @@ index 8c2b18b765..b349a6a2ee 100644
          return last_message_id
  
      def _outbound_media_builder(self, path: str, force_file_attachment: bool = False):
-@@ -2384,13 +2557,25 @@ async def send_weixin_direct(
+@@ -2399,13 +2572,25 @@ async def send_weixin_direct(
              and not send_session.closed
              and send_session._loop is asyncio.get_running_loop()):
          last_result: Optional[SendResult] = None
@@ -614,7 +534,7 @@ index 8c2b18b765..b349a6a2ee 100644
              ext = Path(media_path).suffix.lower()
              if ext in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}:
                  last_result = await live_adapter.send_image_file(chat_id, media_path)
-@@ -2429,13 +2614,25 @@ async def send_weixin_direct(
+@@ -2444,13 +2629,25 @@ async def send_weixin_direct(
          adapter._token_store = token_store
  
          last_result: Optional[SendResult] = None
@@ -645,10 +565,10 @@ index 8c2b18b765..b349a6a2ee 100644
              if ext in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}:
                  last_result = await adapter.send_image_file(chat_id, media_path)
 diff --git a/gateway/run.py b/gateway/run.py
-index 177592bbc3..fded06a485 100644
+index 22b9fa3265..ea8b0ea052 100644
 --- a/gateway/run.py
 +++ b/gateway/run.py
-@@ -1077,6 +1077,8 @@ async def _send_or_update_status_coro(adapter, chat_id, status_key, content, met
+@@ -1092,6 +1092,8 @@ async def _send_or_update_status_coro(adapter, chat_id, status_key, content, met
      Telegram) edit the previous bubble for the same status_key instead of
      appending a new one. Adapters without the method fall back to plain send.
      """
@@ -657,7 +577,7 @@ index 177592bbc3..fded06a485 100644
      sender = getattr(adapter, "send_or_update_status", None)
      if callable(sender):
          return await sender(chat_id, status_key, content, metadata=metadata)
-@@ -1254,6 +1256,97 @@ def _resolve_gateway_display_bool(
+@@ -1269,6 +1271,97 @@ def _resolve_gateway_display_bool(
      return bool(value)
  
  
@@ -755,7 +675,7 @@ index 177592bbc3..fded06a485 100644
  def _telegramize_command_mentions(text: str, platform: Any) -> str:
      """Rewrite slash-command mentions to Telegram-valid command names.
  
-@@ -3014,6 +3107,7 @@ from gateway.platforms.base import (
+@@ -3159,6 +3252,7 @@ from gateway.platforms.base import (
      EphemeralReply,
      MessageEvent,
      MessageType,
@@ -763,7 +683,7 @@ index 177592bbc3..fded06a485 100644
      _prefix_within_utf16_limit,
      _reply_anchor_for_event,
      build_auto_tts_output_path,
-@@ -4549,6 +4643,27 @@ def _should_clear_resume_pending_after_turn(agent_result: dict) -> bool:
+@@ -4702,6 +4796,27 @@ def _should_clear_resume_pending_after_turn(agent_result: dict) -> bool:
      return True
  
  
@@ -791,7 +711,7 @@ index 177592bbc3..fded06a485 100644
  def _preserve_queued_followup_history_offset(
      current_result: dict,
      followup_result: dict,
-@@ -4883,6 +4998,7 @@ class TurnRunner:
+@@ -5036,6 +5151,7 @@ class TurnRunner:
              _progress_adapter = None
          if (
              getattr(_progress_adapter, "supports_code_blocks", False)
@@ -799,7 +719,7 @@ index 177592bbc3..fded06a485 100644
              and tool_name == "terminal"
              and isinstance(args, dict)
              and isinstance(args.get("command"), str)
-@@ -5759,6 +5875,12 @@ class TurnRunner:
+@@ -5912,6 +6028,12 @@ class TurnRunner:
                  _redact_gateway_user_facing_secrets(str(message or ""))[:160],
              )
              return
@@ -812,7 +732,7 @@ index 177592bbc3..fded06a485 100644
          _fut = safe_schedule_threadsafe(
              _send_or_update_status_coro(ctx._status_adapter, ctx._status_chat_id, event_type, prepared_message, ctx._status_thread_metadata),
              ctx._loop_for_step,
-@@ -5855,7 +5977,7 @@ class TurnRunner:
+@@ -6008,7 +6130,7 @@ class TurnRunner:
              source=ctx.source, session_key=ctx.session_key
          )
          # Set up stream consumer for token streaming or interim commentary.
@@ -821,7 +741,7 @@ index 177592bbc3..fded06a485 100644
          _stream_delta_cb = None
          # #60671 — streaming TTS consumer is created on the outer
          # event-loop thread before run_sync launches.  run_sync only
-@@ -5883,10 +6005,43 @@ class TurnRunner:
+@@ -6036,10 +6158,43 @@ class TurnRunner:
          _want_interim_messages = ctx.interim_assistant_messages_enabled
          _want_interim_consumer = _want_interim_messages
          if _want_stream_deltas or _want_interim_consumer:
@@ -867,7 +787,7 @@ index 177592bbc3..fded06a485 100644
                      _consumer_cfg, _pause_typing_before_finalize = (
                          self._runner._build_stream_consumer_config(
                              ctx.source, _scfg, _adapter,
-@@ -5907,14 +6062,26 @@ class TurnRunner:
+@@ -6060,14 +6215,26 @@ class TurnRunner:
                          initial_reply_to_id=ctx.event_message_id,
                          run_still_current=ctx._run_still_current,
                      )
@@ -901,7 +821,7 @@ index 177592bbc3..fded06a485 100644
              except Exception as _sc_err:
                  logger.debug("Could not set up stream consumer: %s", _sc_err)
  
-@@ -5931,6 +6098,10 @@ class TurnRunner:
+@@ -6084,6 +6251,10 @@ class TurnRunner:
                  return
              display_text = text
              if _stream_consumer is not None:
@@ -912,7 +832,7 @@ index 177592bbc3..fded06a485 100644
                  if already_streamed:
                      _stream_consumer.on_segment_break()
                  else:
-@@ -5938,6 +6109,12 @@ class TurnRunner:
+@@ -6091,6 +6262,12 @@ class TurnRunner:
                  return
              if already_streamed or not ctx._status_adapter or not str(display_text or "").strip():
                  return
@@ -925,7 +845,7 @@ index 177592bbc3..fded06a485 100644
              safe_schedule_threadsafe(
                  ctx._status_adapter.send(
                      ctx._status_chat_id,
-@@ -6233,6 +6410,14 @@ class TurnRunner:
+@@ -6386,6 +6563,14 @@ class TurnRunner:
                      self._runner._enforce_agent_cache_cap()
              logger.debug("Created new agent for session %s (sig=%s)", ctx.session_key, _sig)
  
@@ -940,7 +860,7 @@ index 177592bbc3..fded06a485 100644
          # Per-message state — callbacks and reasoning config change every
          # turn and must not be baked into the cached agent constructor.
          # Gate on needs_progress_queue (tool_progress OR thinking_progress)
-@@ -6338,6 +6523,12 @@ class TurnRunner:
+@@ -6491,6 +6676,12 @@ class TurnRunner:
          def _deliver_bg_review_message(message: str) -> None:
              if not ctx._status_adapter or not ctx._run_still_current():
                  return
@@ -953,7 +873,7 @@ index 177592bbc3..fded06a485 100644
              safe_schedule_threadsafe(
                  ctx._status_adapter.send(
                      ctx._status_chat_id,
-@@ -7050,14 +7241,56 @@ class TurnRunner:
+@@ -7203,14 +7394,56 @@ class TurnRunner:
          _input_toks = 0
          _output_toks = 0
          _context_length = 0
@@ -1010,7 +930,7 @@ index 177592bbc3..fded06a485 100644
          # Sync session_id immediately after run_conversation(). Compression
          # can rotate before a follow-up model call fails; the failure return
          # below must still point the gateway at the compressed child.
-@@ -7191,8 +7424,11 @@ class TurnRunner:
+@@ -7344,8 +7577,11 @@ class TurnRunner:
                  "last_prompt_tokens": _last_prompt_toks,
                  "input_tokens": _input_toks,
                  "output_tokens": _output_toks,
@@ -1022,7 +942,7 @@ index 177592bbc3..fded06a485 100644
              }
  
          # Scan tool results for MEDIA:<path> tags that need to be delivered
-@@ -7272,6 +7508,8 @@ class TurnRunner:
+@@ -7425,6 +7661,8 @@ class TurnRunner:
              "last_prompt_tokens": _last_prompt_toks,
              "input_tokens": _input_toks,
              "output_tokens": _output_toks,
@@ -1031,7 +951,7 @@ index 177592bbc3..fded06a485 100644
              "model": _resolved_model,
              "context_length": _context_length,
              "session_id": effective_session_id,
-@@ -7282,6 +7520,7 @@ class TurnRunner:
+@@ -7435,6 +7673,7 @@ class TurnRunner:
              # self-persisted (it didn't — see codex_runtime.py).  Default
              # True preserves the skip-db behaviour for the standard runtime.
              "agent_persisted": (ctx.result_holder[0].get("agent_persisted", True) if ctx.result_holder[0] else True),
@@ -1039,7 +959,7 @@ index 177592bbc3..fded06a485 100644
          }
  
  
-@@ -13855,6 +14094,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -14258,6 +14497,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
          enabled_platform_count = 0
          startup_nonretryable_errors: list[str] = []
          startup_retryable_errors: list[str] = []
@@ -1058,7 +978,7 @@ index 177592bbc3..fded06a485 100644
          _multiplex_on = bool(getattr(self.config, "multiplex_profiles", False))
          _multiplex_skipped_platforms: list[Platform] = []
          # Initialize and connect each configured platform.
-@@ -13870,7 +14121,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -14273,7 +14524,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
          # sequential -- only the (slow) connect() calls run in parallel.
          _pending_connects = []  # (platform, platform_config, adapter)
          for platform, platform_config in self.config.platforms.items():
@@ -1078,7 +998,7 @@ index 177592bbc3..fded06a485 100644
                  return True
              if not platform_config.enabled:
                  continue
-@@ -13892,7 +14154,31 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -14295,7 +14557,31 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                  continue
              enabled_platform_count += 1
  
@@ -1111,7 +1031,7 @@ index 177592bbc3..fded06a485 100644
              if not adapter:
                  # Distinguish between missing builtin deps and missing plugin
                  _pval = platform.value
-@@ -14242,9 +14528,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -14658,9 +14944,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
          hook_count = len(self.hooks.loaded_hooks)
          if hook_count:
              logger.info("%s hook(s) loaded", hook_count)
@@ -1130,7 +1050,7 @@ index 177592bbc3..fded06a485 100644
          
          if connected_count > 0:
              logger.info("Gateway running with %s platform(s)", connected_count)
-@@ -22210,6 +22502,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -23204,6 +23496,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                  persist_user_display_kind=persist_user_display_kind,
                  message_type=event.message_type,
              )
@@ -1143,7 +1063,7 @@ index 177592bbc3..fded06a485 100644
              _turn_seconds = time.monotonic() - _turn_started_monotonic
  
              # Stop persistent typing indicator now that the agent is done.
-@@ -22431,6 +22729,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -23425,6 +23723,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
              except Exception as _footer_err:
                  logger.debug("runtime_footer build failed: %s", _footer_err)
                  _footer_line = ""
@@ -1152,7 +1072,7 @@ index 177592bbc3..fded06a485 100644
              if _footer_line and response and not agent_result.get("already_sent") and not _intentional_silence:
                  response = f"{response}\n\n{_footer_line}"
  
-@@ -24465,7 +24765,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -25484,7 +25784,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
              cfg["platform_toolsets"] = pts
              return sorted(_get_platform_tools(cfg, platform_key))
  
@@ -1163,7 +1083,7 @@ index 177592bbc3..fded06a485 100644
  
      async def _run_background_task_inner(
          self,
-@@ -25943,31 +26245,66 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -27019,31 +27321,66 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
          bytes_sent = 0
          last_stream_time = loop.time()
          buffer = ""
@@ -1242,7 +1162,7 @@ index 177592bbc3..fded06a485 100644
  
          while loop.time() < deadline:
              # Check for completion
-@@ -25980,23 +26317,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -27056,23 +27393,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                              buffer += chunk
                      except OSError:
                          pass
@@ -1277,7 +1197,7 @@ index 177592bbc3..fded06a485 100644
                          )
                      logger.info("Update finished (exit=%s), notified %s", exit_code, session_key)
                  except Exception as e:
-@@ -26089,13 +26423,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -27165,13 +27499,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
          if not exit_code_path.exists():
              logger.warning("Update watcher timed out after %.0fs", timeout)
              exit_code_path.write_text("124", encoding="utf-8")
@@ -1296,7 +1216,7 @@ index 177592bbc3..fded06a485 100644
              except Exception:
                  pass
              for p in (pending_path, claimed_path, output_path,
-@@ -30197,6 +30530,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -31357,6 +31690,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
  
          from run_agent import AIAgent
          import queue
@@ -1304,7 +1224,7 @@ index 177592bbc3..fded06a485 100644
  
          def _run_still_current() -> bool:
              if run_generation is None or not session_key:
-@@ -30372,9 +30706,57 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -31532,9 +31866,57 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
              tool_progress_enabled or _thinking_enabled or _native_slack_task_cards
          )
  
@@ -1363,7 +1283,7 @@ index 177592bbc3..fded06a485 100644
          last_tool = [None]  # Mutable container for tracking in closure
          last_progress_msg = [None]  # Track last message for dedup
          repeat_count = [0]  # How many times the same message repeated
-@@ -30480,6 +30862,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -31640,6 +32022,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
              persist_user_timestamp=persist_user_timestamp,
              persist_user_display_kind=persist_user_display_kind,
          )
@@ -1373,7 +1293,7 @@ index 177592bbc3..fded06a485 100644
          turn_runner = TurnRunner(self, turn_ctx)
          # Callback invoked by agent on tool lifecycle events — extracted to
          # TurnRunner.progress_callback (bound method, same signature).
-@@ -30674,7 +31059,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -31834,7 +32219,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
          turn_ctx.agent_holder = agent_holder
          result_holder = [None]  # Mutable container for the result
          tools_holder = [None]   # Mutable container for the tool definitions
@@ -1381,7 +1301,7 @@ index 177592bbc3..fded06a485 100644
          # #60671 — streaming PCM audio consumer.  Created on the gateway
          # event-loop thread (NOT inside run_sync's executor worker) so the
          # outer finalisation / interrupt paths can reference it without a
-@@ -30740,6 +31124,49 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -31900,6 +32284,49 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
          turn_ctx._status_thread_metadata = _status_thread_metadata
          turn_ctx._status_callback_sync = turn_runner._status_callback_sync
  
@@ -1431,7 +1351,7 @@ index 177592bbc3..fded06a485 100644
          # ---- Streaming TTS consumer setup (#60671) ----
          # Created on the gateway event-loop thread (here, in _run_agent_inner),
          # NOT inside run_sync's executor worker.  This avoids a cross-scope
-@@ -30790,7 +31217,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -31950,7 +32377,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
          # tool_progress:off user had the callback queue _thinking messages that
          # no task ever drained — so they silently never appeared.
          progress_task = None
@@ -1443,7 +1363,7 @@ index 177592bbc3..fded06a485 100644
              progress_task = asyncio.create_task(send_progress_messages())
  
          # Start the tool-call log writer when tool_progress == "log".
-@@ -30991,6 +31421,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -32151,6 +32581,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                      else f"⏳ Working — {_elapsed_mins} min{_status_detail}"
                  )
                  try:
@@ -1455,7 +1375,7 @@ index 177592bbc3..fded06a485 100644
                      _notify_res = None
                      if _heartbeat_msg_id:
                          try:
-@@ -31293,6 +31728,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -32453,6 +32888,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                              if _stts is not None:
                                  _stts.abort("barge-in")
  
@@ -1478,7 +1398,7 @@ index 177592bbc3..fded06a485 100644
              if _inactivity_timeout:
                  # Build a diagnostic summary from the agent's activity tracker.
                  _timed_out_agent = agent_holder[0]
-@@ -31717,14 +32168,33 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+@@ -32877,14 +33328,33 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                  # follow-up.  Use the same (session_key, session_id) the
                  # recursive call runs under so the snapshot matches exactly
                  # what the follow-up's guard will consult.  Fail-safe in helper.
@@ -1515,19 +1435,19 @@ index 177592bbc3..fded06a485 100644
                      run_generation=run_generation,
                      _interrupt_depth=_interrupt_depth + 1,
 diff --git a/gateway/slash_commands.py b/gateway/slash_commands.py
-index 41b829f6d8..691e3ac64f 100644
+index 4481eadd41..9144ed9416 100644
 --- a/gateway/slash_commands.py
 +++ b/gateway/slash_commands.py
-@@ -6329,7 +6329,7 @@ class GatewaySlashCommandsMixin:
- 
-         return await loop.run_in_executor(None, _collect_and_upload)
+@@ -6417,7 +6417,7 @@ class GatewaySlashCommandsMixin:
+         # profile's diagnostics from another profile's chat.
+         return await self._run_in_executor_with_context(_collect_and_upload)
  
 -    async def _handle_update_command(self, event: MessageEvent) -> str:
 +    async def _handle_update_command(self, event: MessageEvent) -> Optional[str]:
          """Handle /update command — update Hermes Agent to the latest version.
  
          Spawns ``hermes update`` in a detached session (via ``setsid``) so it
-@@ -6485,4 +6485,12 @@ class GatewaySlashCommandsMixin:
+@@ -6573,4 +6573,12 @@ class GatewaySlashCommandsMixin:
              return t("gateway.update.start_failed", error=e)
  
          self._schedule_update_notification_watch()
@@ -1541,7 +1461,7 @@ index 41b829f6d8..691e3ac64f 100644
 +            return None
          return t("gateway.update.starting")
 diff --git a/gateway/stream_consumer.py b/gateway/stream_consumer.py
-index 22aac6e8cc..75e5aba49e 100644
+index 7b4d905ea1..72fc074872 100644
 --- a/gateway/stream_consumer.py
 +++ b/gateway/stream_consumer.py
 @@ -21,6 +21,7 @@ import inspect
@@ -1583,7 +1503,7 @@ index 22aac6e8cc..75e5aba49e 100644
  @dataclass
  class StreamConsumerConfig:
      """Runtime config for a single stream consumer instance."""
-@@ -425,6 +443,10 @@ class GatewayStreamConsumer:
+@@ -431,6 +449,10 @@ class GatewayStreamConsumer:
          self._tool_progress_lines: list[str] = []
          self._tool_progress_active: bool = False
  
@@ -1594,7 +1514,7 @@ index 22aac6e8cc..75e5aba49e 100644
  
      def _stream_is_message(self) -> bool:
          """Whether THIS chat's transport treats the stream as the message.
-@@ -807,6 +829,37 @@ class GatewayStreamConsumer:
+@@ -832,6 +854,37 @@ class GatewayStreamConsumer:
          ):
              self._queue.put(_REOPEN_SEED)
  
@@ -1632,7 +1552,7 @@ index 22aac6e8cc..75e5aba49e 100644
      def _notify_new_message(self) -> None:
          """Fire the on_new_message callback, swallowing any errors."""
          cb = self._on_new_message
-@@ -1023,6 +1076,69 @@ class GatewayStreamConsumer:
+@@ -1049,6 +1102,69 @@ class GatewayStreamConsumer:
                  except Exception:
                      pass
  
@@ -1702,7 +1622,7 @@ index 22aac6e8cc..75e5aba49e 100644
      def on_delta(self, text: str) -> None:
          """Thread-safe callback — called from the agent's worker thread.
  
-@@ -1293,6 +1409,8 @@ class GatewayStreamConsumer:
+@@ -1319,6 +1435,8 @@ class GatewayStreamConsumer:
                  approval_boundary_future = None
                  approval_boundary_cancelled = None
                  commentary_text = None
@@ -1711,7 +1631,7 @@ index 22aac6e8cc..75e5aba49e 100644
                  while True:
                      try:
                          item = self._queue.get_nowait()
-@@ -1381,6 +1499,13 @@ class GatewayStreamConsumer:
+@@ -1407,6 +1525,13 @@ class GatewayStreamConsumer:
                                  self._tool_progress_lines.append(item[1])
                                  self._tool_progress_active = True
                              continue  # continue draining to batch simultaneous progress lines
@@ -1725,7 +1645,7 @@ index 22aac6e8cc..75e5aba49e 100644
                          self._filter_and_accumulate(item)
                      except queue.Empty:
                          break
-@@ -1479,6 +1604,8 @@ class GatewayStreamConsumer:
+@@ -1505,6 +1630,8 @@ class GatewayStreamConsumer:
                      got_done
                      or got_segment_break
                      or commentary_text is not None
@@ -1734,7 +1654,7 @@ index 22aac6e8cc..75e5aba49e 100644
                  )
                  if not self.cfg.buffer_only:
                      if self._use_native_streaming:
-@@ -1497,6 +1624,11 @@ class GatewayStreamConsumer:
+@@ -1523,6 +1650,11 @@ class GatewayStreamConsumer:
                              # check. _len_fn is reserved for overflow detection.
                              or len(self._accumulated) >= self.cfg.buffer_threshold
                          )
@@ -1746,7 +1666,7 @@ index 22aac6e8cc..75e5aba49e 100644
  
                  current_update_visible = False
                  # Whether the got_done update below was delivered as a FRESH
-@@ -1525,7 +1657,22 @@ class GatewayStreamConsumer:
+@@ -1551,7 +1683,22 @@ class GatewayStreamConsumer:
                      )
                  ):
                      should_edit = False
@@ -1770,7 +1690,7 @@ index 22aac6e8cc..75e5aba49e 100644
                      # Split overflow: if accumulated text exceeds the platform
                      # limit, split into properly sized chunks.
                      # Native streaming bypasses this entirely — the adapter's
-@@ -1534,6 +1681,8 @@ class GatewayStreamConsumer:
+@@ -1560,6 +1707,8 @@ class GatewayStreamConsumer:
                      # bytes vs. MAX_MESSAGE_LENGTH's 4000 codepoints).
                      if (
                          not self._use_native_streaming
@@ -1779,7 +1699,7 @@ index 22aac6e8cc..75e5aba49e 100644
                          and _len_fn(self._accumulated) > _safe_limit
                          and self._message_id is None
                      ):
-@@ -1636,7 +1785,9 @@ class GatewayStreamConsumer:
+@@ -1662,7 +1811,9 @@ class GatewayStreamConsumer:
                      # Existing message: edit it with the first chunk, then
                      # start a new message for the overflow remainder.
                      while (
@@ -1790,7 +1710,7 @@ index 22aac6e8cc..75e5aba49e 100644
                          and self._message_id is not None
                          and self._edit_supported
                      ):
-@@ -1674,17 +1825,30 @@ class GatewayStreamConsumer:
+@@ -1700,17 +1851,30 @@ class GatewayStreamConsumer:
                          # multi-message delivery (#71643 record semantics).
                          self._turn_split_delivery = True
  
@@ -1831,7 +1751,7 @@ index 22aac6e8cc..75e5aba49e 100644
  
                      # Segment break: finalize the current message so platforms
                      # that need explicit closure (e.g. DingTalk AI Cards) don't
-@@ -1840,7 +2004,8 @@ class GatewayStreamConsumer:
+@@ -1866,7 +2030,8 @@ class GatewayStreamConsumer:
                              # visible update this tick) OR the adapter needs
                              # explicit finalize=True to close the stream.
                              self._final_response_sent = await self._send_or_edit(
@@ -1841,7 +1761,7 @@ index 22aac6e8cc..75e5aba49e 100644
                              )
                              if self._final_response_sent:
                                  self._final_content_delivered = True
-@@ -3352,6 +3517,9 @@ class GatewayStreamConsumer:
+@@ -3416,6 +3581,9 @@ class GatewayStreamConsumer:
                      )
                      if result.success:
                          self._already_sent = True
@@ -1851,11 +1771,298 @@ index 22aac6e8cc..75e5aba49e 100644
                          # Record any continuation fragments an oversized edit
                          # split off, so fresh-final can clean them all up.
                          self._track_preview_ids_from_result(result)
+diff --git a/hermes_cli/companion_cli_updates.py b/hermes_cli/companion_cli_updates.py
+new file mode 100644
+index 0000000000..23b2c54876
+--- /dev/null
++++ b/hermes_cli/companion_cli_updates.py
+@@ -0,0 +1,281 @@
++"""Update installed command-line companions used alongside Hermes."""
++
++from __future__ import annotations
++
++import json
++import os
++import re
++import shutil
++import subprocess
++import tempfile
++from datetime import datetime, timezone
++from pathlib import Path
++from typing import Callable, Mapping, Optional
++
++
++_RUNTIME_PACKAGE_EXCLUSIONS = {
++    # This package is the live Feishu gateway plugin, not merely a CLI. It has
++    # its own compatibility lifecycle and must not be swept up by generic CLI
++    # updates just because it exposes an installer binary.
++    "@colinlu50/openclaw-lark-stream",
++}
++
++
++def companion_cli_updates_enabled() -> bool:
++    try:
++        from hermes_cli.config import load_config
++
++        updates = (load_config() or {}).get("updates", {})
++        value = updates.get("update_companion_clis", False) if isinstance(updates, dict) else False
++    except Exception:
++        return False
++    if isinstance(value, str):
++        return value.strip().lower() not in {"0", "false", "no", "off"}
++    return bool(value)
++
++
++def _npm_root(npm: str, run: Callable = subprocess.run) -> Optional[Path]:
++    result = run([npm, "root", "-g"], capture_output=True, text=True, check=False)
++    if result.returncode != 0 or not result.stdout.strip():
++        return None
++    return Path(result.stdout.strip())
++
++
++def discover_outdated_npm_clis(
++    *,
++    npm: str,
++    npm_root: Optional[Path] = None,
++    run: Callable = subprocess.run,
++) -> dict[str, Mapping[str, object]]:
++    """Return outdated global npm packages that actually expose CLI bins."""
++    result = run(
++        [npm, "outdated", "-g", "--json"],
++        capture_output=True,
++        text=True,
++        check=False,
++    )
++    raw = result.stdout.strip() or "{}"
++    try:
++        payload = json.loads(raw)
++    except json.JSONDecodeError:
++        return {}
++    if not isinstance(payload, dict):
++        return {}
++
++    root = Path(npm_root) if npm_root is not None else _npm_root(npm, run=run)
++    if root is None:
++        return {}
++    discovered: dict[str, Mapping[str, object]] = {}
++    for name, metadata in payload.items():
++        if name in _RUNTIME_PACKAGE_EXCLUSIONS or not isinstance(metadata, dict):
++            continue
++        manifest = root / name / "package.json"
++        try:
++            package = json.loads(manifest.read_text(encoding="utf-8"))
++        except (OSError, json.JSONDecodeError):
++            continue
++        if package.get("bin"):
++            discovered[name] = metadata
++    return discovered
++
++
++def sync_lark_skills_state(state_path: Path, version: str) -> None:
++    """Stamp lark's state file after the official skills installer succeeds."""
++    path = Path(state_path)
++    try:
++        payload = json.loads(path.read_text(encoding="utf-8"))
++    except (OSError, json.JSONDecodeError):
++        return
++    if not isinstance(payload, dict):
++        return
++    payload["version"] = version
++    payload["updated_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
++    path.parent.mkdir(parents=True, exist_ok=True)
++    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
++    try:
++        with os.fdopen(fd, "w", encoding="utf-8") as handle:
++            json.dump(payload, handle, ensure_ascii=False, indent=2)
++            handle.write("\n")
++        os.replace(tmp_name, path)
++    except Exception:
++        try:
++            os.unlink(tmp_name)
++        except OSError:
++            pass
++        raise
++
++
++def _tail(result: subprocess.CompletedProcess[str]) -> str:
++    text = (result.stderr or result.stdout or "").strip().splitlines()
++    return text[-1] if text else f"exit {result.returncode}"
++
++
++def _run(
++    command: list[str],
++    *,
++    env: dict[str, str],
++    timeout: int = 600,
++) -> subprocess.CompletedProcess[str]:
++    return subprocess.run(
++        command,
++        capture_output=True,
++        text=True,
++        check=False,
++        timeout=timeout,
++        env=env,
++    )
++
++
++def _lark_version(lark: str, env: dict[str, str]) -> str:
++    result = _run([lark, "--version"], env=env, timeout=30)
++    match = re.search(r"(\d+\.\d+\.\d+)", result.stdout or result.stderr or "")
++    return match.group(1) if match else ""
++
++
++def _ensure_lark_skills_synced(
++    *,
++    lark: str,
++    npx: Optional[str],
++    env: dict[str, str],
++) -> None:
++    check = _run([lark, "update", "--check", "--json"], env=env, timeout=120)
++    try:
++        payload = json.loads(check.stdout or "{}")
++    except json.JSONDecodeError:
++        payload = {}
++    skills = payload.get("skills_status", {}) if isinstance(payload, dict) else {}
++    if check.returncode == 0 and isinstance(skills, dict) and skills.get("in_sync") is not False:
++        return
++    if not npx:
++        raise RuntimeError("lark-cli Skills are out of sync and npx is unavailable")
++    install = _run([npx, "-y", "skills", "add", "larksuite/cli", "-y", "-g"], env=env)
++    if install.returncode != 0:
++        raise RuntimeError(f"lark-cli Skills sync failed: {_tail(install)}")
++    version = _lark_version(lark, env)
++    if version:
++        sync_lark_skills_state(Path.home() / ".lark-cli" / "skills-state.json", version)
++    verify = _run([lark, "update", "--check", "--json"], env=env, timeout=120)
++    try:
++        verified = json.loads(verify.stdout or "{}")
++    except json.JSONDecodeError:
++        verified = {}
++    verified_skills = verified.get("skills_status", {}) if isinstance(verified, dict) else {}
++    if verify.returncode != 0 or not isinstance(verified_skills, dict) or not verified_skills.get("in_sync"):
++        raise RuntimeError("lark-cli Skills remain out of sync after reinstall")
++
++
++def _ensure_agent_browser_entrypoint(
++    *,
++    npm: str,
++    env: dict[str, str],
++) -> bool:
++    """Repair the dangling global shim that `hermes update` can leave behind."""
++    root = _npm_root(npm)
++    manifest = root / "agent-browser" / "package.json" if root else None
++    executable = shutil.which("agent-browser")
++    # Current Hermes resolves agent-browser lazily through npx. Do not turn a
++    # chat-triggered update into an implicit global install on machines that do
++    # not already carry it (and, in particular, do not acquire a browser
++    # runtime as a side effect). Existing global installs are still repaired.
++    if not executable and not (manifest and manifest.is_file()):
++        return False
++    if manifest and manifest.is_file() and executable:
++        verify = _run([executable, "--version"], env=env, timeout=30)
++        if verify.returncode == 0:
++            return False
++
++    no_browser_env = dict(env)
++    no_browser_env["npm_config_ignore_scripts"] = "true"
++    repair = _run(
++        [npm, "install", "-g", "agent-browser@latest"],
++        env=no_browser_env,
++    )
++    if repair.returncode != 0:
++        raise RuntimeError(f"agent-browser entrypoint repair failed: {_tail(repair)}")
++    executable = shutil.which("agent-browser")
++    if not executable:
++        raise RuntimeError("agent-browser entrypoint remains unavailable after repair")
++    verify = _run([executable, "--version"], env=env, timeout=30)
++    if verify.returncode != 0:
++        raise RuntimeError(f"agent-browser remains unusable after repair: {_tail(verify)}")
++    return True
++
++
++def update_companion_clis(*, print_fn: Callable[[str], None] = print) -> list[str]:
++    """Update every outdated installed npm CLI, with tool-specific guards."""
++    npm = shutil.which("npm")
++    if not npm:
++        raise RuntimeError("npm is unavailable; companion CLIs cannot be checked")
++    npx = shutil.which("npx")
++    env = dict(os.environ)
++    env["LARKSUITE_CLI_NO_UPDATE_NOTIFIER"] = "1"
++    env["LARKSUITE_CLI_NO_SKILLS_NOTIFIER"] = "1"
++    outdated = discover_outdated_npm_clis(npm=npm)
++    updated: list[str] = []
++
++    # npm updates its own executable tree, so update it after every other CLI.
++    for package in sorted(outdated, key=lambda item: item == "npm"):
++        print_fn(f"  → Updating {package}...")
++        if package == "@openai/codex" and shutil.which("codex"):
++            result = _run([shutil.which("codex") or "codex", "update"], env=env)
++            if result.returncode != 0:
++                result = _run([npm, "install", "-g", f"{package}@latest"], env=env)
++        elif package == "@larksuite/cli" and shutil.which("lark-cli"):
++            lark = shutil.which("lark-cli") or "lark-cli"
++            result = _run([lark, "update", "--json"], env=env)
++            if result.returncode != 0:
++                result = _run([npm, "install", "-g", f"{package}@latest"], env=env)
++        elif package == "agent-browser":
++            no_browser_env = dict(env)
++            no_browser_env["npm_config_ignore_scripts"] = "true"
++            result = _run([npm, "install", "-g", f"{package}@latest"], env=no_browser_env)
++        else:
++            result = _run([npm, "install", "-g", f"{package}@latest"], env=env)
++        if result.returncode != 0:
++            raise RuntimeError(f"{package} update failed: {_tail(result)}")
++
++        if package == "@anthropic-ai/claude-code" and shutil.which("claude"):
++            verify = _run([shutil.which("claude") or "claude", "--version"], env=env, timeout=30)
++            if verify.returncode != 0:
++                root = _npm_root(npm)
++                installer = root / package / "install.cjs" if root else None
++                node = shutil.which("node")
++                if not installer or not installer.is_file() or not node:
++                    raise RuntimeError("Claude Code native binary is missing after update")
++                install_native = _run([node, str(installer)], env=env, timeout=300)
++                if install_native.returncode != 0:
++                    raise RuntimeError(f"Claude Code native install failed: {_tail(install_native)}")
++        updated.append(package)
++
++    lark = shutil.which("lark-cli")
++    if lark:
++        _ensure_lark_skills_synced(lark=lark, npx=npx, env=env)
++
++    if _ensure_agent_browser_entrypoint(npm=npm, env=env):
++        if "agent-browser" not in updated:
++            updated.append("agent-browser")
++        print_fn("  ✓ Repaired agent-browser CLI entrypoint (Chromium install skipped)")
++
++    remaining = discover_outdated_npm_clis(npm=npm)
++    if remaining:
++        raise RuntimeError("CLI updates remain pending: " + ", ".join(remaining))
++    if updated:
++        print_fn(f"  ✓ Updated {len(updated)} companion CLI(s)")
++    else:
++        print_fn("  ✓ Companion CLIs are up to date")
++    return updated
++
++
++def maybe_update_companion_clis(gateway_mode: bool) -> list[str]:
++    """Update companion CLIs only for chat-triggered update runs."""
++    if not gateway_mode or not companion_cli_updates_enabled():
++        return []
++    print("\n→ Updating companion CLIs...")
++    try:
++        return update_companion_clis()
++    except Exception as exc:
++        # A companion registry outage must not strand Hermes halfway through
++        # its own update. The warning is streamed into the existing /update
++        # card so the operator can retry without receiving an opaque crash.
++        print(f"  ⚠ Companion CLI update incomplete: {exc}")
++        return []
 diff --git a/hermes_cli/update_cmd.py b/hermes_cli/update_cmd.py
-index 2254fb42df..336da16ad7 100644
+index 05a4e11669..1873e8d7d0 100644
 --- a/hermes_cli/update_cmd.py
 +++ b/hermes_cli/update_cmd.py
-@@ -8718,6 +8718,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
+@@ -9043,6 +9043,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
                      "long-lived processes still use the previous runtime."
                  )
                  print("  Restart each of them to pick up the repaired runtime.")
@@ -1865,7 +2072,7 @@ index 2254fb42df..336da16ad7 100644
              _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
              # Git is current, but a prior pull may still owe the fleet a
              # restart (#95294). Catch up even on the "Already up to date"
-@@ -9404,6 +9407,10 @@ def _cmd_update_impl(args, gateway_mode: bool):
+@@ -9729,6 +9732,10 @@ def _cmd_update_impl(args, gateway_mode: bool):
              pre_update_snapshot_id=pre_update_snapshot_id,
          )
  
@@ -1877,7 +2084,7 @@ index 2254fb42df..336da16ad7 100644
              node_failures=node_failures,
              desktop_build_ok=desktop_build_ok,
 diff --git a/plugins/platforms/feishu/adapter.py b/plugins/platforms/feishu/adapter.py
-index 153f2d4d0c..8a2c0173a5 100644
+index 041ff06c41..d0c750864c 100644
 --- a/plugins/platforms/feishu/adapter.py
 +++ b/plugins/platforms/feishu/adapter.py
 @@ -8,7 +8,7 @@ Supports:
@@ -1965,117 +2172,7 @@ index 153f2d4d0c..8a2c0173a5 100644
  }
  
  
-@@ -1322,16 +1353,73 @@ def _strip_edge_self_mentions(
-             return remaining
- 
- 
-+class _ThreadLocalEventLoopProxy:
-+    """Route the Lark SDK's module-global loop to the calling WS thread.
-+
-+    ``lark_oapi.ws.client`` stores its event loop in a module global.  A
-+    multi-account gateway runs one SDK client per thread, so assigning each
-+    thread's loop directly to that global makes the clients overwrite one
-+    another.  The next SDK reconnect then tries to await a Future owned by the
-+    other account's loop.  A stable proxy keeps the SDK API unchanged while
-+    resolving the actual loop from the current thread.
-+    """
-+
-+    @staticmethod
-+    def _current() -> asyncio.AbstractEventLoop:
-+        return asyncio.get_event_loop()
-+
-+    def run_until_complete(self, future: Any) -> Any:
-+        return self._current().run_until_complete(future)
-+
-+    def create_task(self, coroutine: Any) -> asyncio.Task:
-+        return self._current().create_task(coroutine)
-+
-+    def __getattr__(self, name: str) -> Any:
-+        return getattr(self._current(), name)
-+
-+
-+_FEISHU_WS_LOOP_PROXY = _ThreadLocalEventLoopProxy()
-+_FEISHU_WS_RUNTIME_CONTEXT = threading.local()
-+_FEISHU_WS_HOOK_LOCK = threading.Lock()
-+
-+
-+def _install_feishu_ws_runtime_hooks(ws_client_module: Any) -> None:
-+    """Install process-wide SDK hooks that remain safe across WS accounts."""
-+    import functools
-+
-+    with _FEISHU_WS_HOOK_LOCK:
-+        ws_client_module.loop = _FEISHU_WS_LOOP_PROXY
-+        if getattr(ws_client_module, "_hermes_thread_local_hooks", False):
-+            return
-+
-+        original_connect = ws_client_module.websockets.connect
-+
-+        @functools.wraps(original_connect)
-+        def connect_with_runtime_overrides(*args: Any, **kwargs: Any) -> Any:
-+            active_adapter = getattr(_FEISHU_WS_RUNTIME_CONTEXT, "adapter", None)
-+            if active_adapter is not None:
-+                ping_interval = getattr(active_adapter, "_ws_ping_interval", None)
-+                ping_timeout = getattr(active_adapter, "_ws_ping_timeout", None)
-+                if ping_interval is not None and "ping_interval" not in kwargs:
-+                    kwargs["ping_interval"] = ping_interval
-+                if ping_timeout is not None and "ping_timeout" not in kwargs:
-+                    kwargs["ping_timeout"] = ping_timeout
-+            return original_connect(*args, **kwargs)
-+
-+        ws_client_module.websockets.connect = connect_with_runtime_overrides
-+        ws_client_module._hermes_thread_local_hooks = True
-+
-+
- def _run_official_feishu_ws_client(ws_client: Any, adapter: Any) -> None:
-     """Run the official Lark WS client in its own thread-local event loop."""
-     import lark_oapi.ws.client as ws_client_module
- 
-     loop = asyncio.new_event_loop()
-     asyncio.set_event_loop(loop)
--    ws_client_module.loop = loop
-+    _install_feishu_ws_runtime_hooks(ws_client_module)
-+    _FEISHU_WS_RUNTIME_CONTEXT.adapter = adapter
-     adapter._ws_thread_loop = loop
- 
--    original_connect = ws_client_module.websockets.connect
-     original_configure = getattr(ws_client, "_configure", None)
- 
-     def _apply_runtime_ws_overrides() -> None:
-@@ -1343,13 +1431,6 @@ def _run_official_feishu_ws_client(ws_client: Any, adapter: Any) -> None:
-         except Exception:
-             logger.debug("[Feishu] Failed to apply websocket runtime overrides", exc_info=True)
- 
--    def _connect_with_overrides(*args: Any, **kwargs: Any) -> Any:
--        if adapter._ws_ping_interval is not None and "ping_interval" not in kwargs:
--            kwargs["ping_interval"] = adapter._ws_ping_interval
--        if adapter._ws_ping_timeout is not None and "ping_timeout" not in kwargs:
--            kwargs["ping_timeout"] = adapter._ws_ping_timeout
--        return original_connect(*args, **kwargs)
--
-     def _configure_with_overrides(conf: Any) -> Any:
-         if original_configure is None:
-             raise RuntimeError("Feishu _configure_with_overrides called but original_configure is None")
-@@ -1357,7 +1438,6 @@ def _run_official_feishu_ws_client(ws_client: Any, adapter: Any) -> None:
-         _apply_runtime_ws_overrides()
-         return result
- 
--    ws_client_module.websockets.connect = _connect_with_overrides
-     if original_configure is not None:
-         setattr(ws_client, "_configure", _configure_with_overrides)
-     _apply_runtime_ws_overrides()
-@@ -1366,7 +1446,10 @@ def _run_official_feishu_ws_client(ws_client: Any, adapter: Any) -> None:
-     except Exception:
-         pass
-     finally:
--        ws_client_module.websockets.connect = original_connect
-+        try:
-+            delattr(_FEISHU_WS_RUNTIME_CONTEXT, "adapter")
-+        except AttributeError:
-+            pass
-         if original_configure is not None:
-             setattr(ws_client, "_configure", original_configure)
-         pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
-@@ -1396,6 +1479,17 @@ def _load_lark_oapi() -> bool:
+@@ -1482,6 +1513,17 @@ def _load_lark_oapi() -> bool:
          try:
              import lark_oapi as lark
              from lark_oapi.api.application.v6 import GetApplicationRequest
@@ -2093,7 +2190,7 @@ index 153f2d4d0c..8a2c0173a5 100644
              from lark_oapi.api.im.v1 import (
                  CreateFileRequest, CreateFileRequestBody,
                  CreateImageRequest, CreateImageRequestBody,
-@@ -1419,6 +1513,15 @@ def _load_lark_oapi() -> bool:
+@@ -1505,6 +1547,15 @@ def _load_lark_oapi() -> bool:
          globals().update({
              "lark": lark,
              "GetApplicationRequest": GetApplicationRequest,
@@ -2109,7 +2206,7 @@ index 153f2d4d0c..8a2c0173a5 100644
              "CreateFileRequest": CreateFileRequest,
              "CreateFileRequestBody": CreateFileRequestBody,
              "CreateImageRequest": CreateImageRequest,
-@@ -1486,6 +1589,7 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -1572,6 +1623,7 @@ class FeishuAdapter(BasePlatformAdapter):
  
      supports_code_blocks = True  # Feishu renders fenced code blocks
      splits_long_messages = True  # send() chunks via truncate_message(MAX_MESSAGE_LENGTH)
@@ -2117,7 +2214,7 @@ index 153f2d4d0c..8a2c0173a5 100644
  
      MAX_MESSAGE_LENGTH = 8000
      # Max distinct chat IDs retained in _chat_locks before LRU eviction kicks in.
-@@ -1540,6 +1644,8 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -1631,6 +1683,8 @@ class FeishuAdapter(BasePlatformAdapter):
          self._chat_locks: "collections.OrderedDict[str, asyncio.Lock]" = collections.OrderedDict()  # chat_id → lock (per-chat serial processing, LRU-bounded)
          self._sent_message_ids_to_chat: Dict[str, str] = {}  # message_id → chat_id (for reaction routing)
          self._sent_message_id_order: List[str] = []  # LRU order for _sent_message_ids_to_chat
@@ -2126,7 +2223,7 @@ index 153f2d4d0c..8a2c0173a5 100644
          self._chat_info_cache: Dict[str, Dict[str, Any]] = {}
          self._message_text_cache: "OrderedDict[str, Optional[str]]" = OrderedDict()
          self._app_lock_identity: Optional[str] = None
-@@ -1947,6 +2053,445 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -2057,6 +2111,445 @@ class FeishuAdapter(BasePlatformAdapter):
      # Outbound — send / edit / send_image / send_voice / …
      # =========================================================================
  
@@ -2572,7 +2669,7 @@ index 153f2d4d0c..8a2c0173a5 100644
      async def send(
          self,
          chat_id: str,
-@@ -1959,6 +2504,17 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -2069,6 +2562,17 @@ class FeishuAdapter(BasePlatformAdapter):
              return SendResult(success=False, error="Not connected")
  
          formatted = self.format_message(content)
@@ -2590,7 +2687,7 @@ index 153f2d4d0c..8a2c0173a5 100644
          chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
          # When chunking splits a long markdown response, an individual chunk
          # can end up as plain prose that doesn't match the per-chunk hint
-@@ -1975,6 +2531,7 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -2085,6 +2589,7 @@ class FeishuAdapter(BasePlatformAdapter):
                  msg_type, payload = self._build_outbound_payload(
                      chunk, prefer_post=prefer_post,
                  )
@@ -2598,7 +2695,7 @@ index 153f2d4d0c..8a2c0173a5 100644
                  try:
                      response = await self._feishu_send_with_retry(
                          chat_id=chat_id,
-@@ -1994,6 +2551,7 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -2104,6 +2609,7 @@ class FeishuAdapter(BasePlatformAdapter):
                          reply_to=reply_to,
                          metadata=metadata,
                      )
@@ -2606,7 +2703,7 @@ index 153f2d4d0c..8a2c0173a5 100644
                  if (
                      msg_type == "post"
                      and not self._response_succeeded(response)
-@@ -2007,6 +2565,12 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -2117,6 +2623,12 @@ class FeishuAdapter(BasePlatformAdapter):
                          reply_to=reply_to,
                          metadata=metadata,
                      )
@@ -2619,7 +2716,7 @@ index 153f2d4d0c..8a2c0173a5 100644
                  last_response = response
  
              return self._finalize_send_result(last_response, "send failed")
-@@ -2021,14 +2585,38 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -2131,14 +2643,38 @@ class FeishuAdapter(BasePlatformAdapter):
          content: str,
          *,
          finalize: bool = False,
@@ -2659,7 +2756,7 @@ index 153f2d4d0c..8a2c0173a5 100644
              body = self._build_update_message_body(msg_type=msg_type, content=payload)
              request = self._build_update_message_request(message_id=message_id, request_body=body)
              response = await self._run_blocking(self._client.im.v1.message.update, request)
-@@ -2044,6 +2632,8 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -2154,6 +2690,8 @@ class FeishuAdapter(BasePlatformAdapter):
                  result = self._finalize_send_result(fallback_response, "update failed")
              if result.success:
                  result.message_id = message_id
@@ -2668,7 +2765,7 @@ index 153f2d4d0c..8a2c0173a5 100644
              return result
          except Exception as exc:
              logger.error("[Feishu] Failed to edit message %s: %s", message_id, exc, exc_info=True)
-@@ -2723,8 +3313,8 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -2833,8 +3371,8 @@ class FeishuAdapter(BasePlatformAdapter):
              emoji_type,
          )
          # Drop bot/app-origin reactions to break the feedback loop from our
@@ -2679,7 +2776,7 @@ index 153f2d4d0c..8a2c0173a5 100644
          loop = self._loop
          if (
              operator_type in {"bot", "app"}
-@@ -2791,15 +3381,20 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -2901,15 +3439,20 @@ class FeishuAdapter(BasePlatformAdapter):
          future.add_done_callback(self._log_background_failure)
          return True
  
@@ -2707,7 +2804,7 @@ index 153f2d4d0c..8a2c0173a5 100644
  
      def _handle_approval_card_action(self, *, event: Any, action_value: Dict[str, Any], loop: Any) -> Any:
          """Schedule approval resolution and build the synchronous callback response."""
-@@ -2815,7 +3410,10 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -2925,7 +3468,10 @@ class FeishuAdapter(BasePlatformAdapter):
  
          operator = getattr(event, "operator", None)
          open_id = str(getattr(operator, "open_id", "") or "")
@@ -2719,7 +2816,7 @@ index 153f2d4d0c..8a2c0173a5 100644
              logger.warning("[Feishu] Unauthorized approval click by %s", open_id or "<unknown>")
              return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
  
-@@ -2874,7 +3472,10 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -2984,7 +3530,10 @@ class FeishuAdapter(BasePlatformAdapter):
  
          operator = getattr(event, "operator", None)
          open_id = str(getattr(operator, "open_id", "") or "")
@@ -2731,7 +2828,7 @@ index 153f2d4d0c..8a2c0173a5 100644
              logger.warning("[Feishu] Unauthorized update prompt click by %s", open_id or "<unknown>")
              return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
  
-@@ -2926,10 +3527,15 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -3036,10 +3585,15 @@ class FeishuAdapter(BasePlatformAdapter):
          if not state:
              logger.debug("[Feishu] Approval %s already resolved or unknown", approval_id)
              return
@@ -2750,7 +2847,7 @@ index 153f2d4d0c..8a2c0173a5 100644
          if expected_chat_id and chat_id and expected_chat_id != chat_id:
              logger.warning(
                  "[Feishu] Approval %s chat mismatch (expected=%s, got=%s)",
-@@ -2980,7 +3586,10 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -3090,7 +3644,10 @@ class FeishuAdapter(BasePlatformAdapter):
          if not state:
              logger.debug("[Feishu] Update prompt %s already resolved or unknown", prompt_id)
              return
@@ -2762,7 +2859,7 @@ index 153f2d4d0c..8a2c0173a5 100644
              logger.warning("[Feishu] Unauthorized update prompt click by %s for prompt %s", open_id, prompt_id)
              return
          expected_chat_id = str(state.get("chat_id", "") or "")
-@@ -3177,6 +3786,34 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -3287,6 +3844,34 @@ class FeishuAdapter(BasePlatformAdapter):
      def _reactions_enabled(self) -> bool:
          return os.getenv("FEISHU_REACTIONS", "true").strip().lower() not in {"false", "0", "no"}
  
@@ -2797,7 +2894,7 @@ index 153f2d4d0c..8a2c0173a5 100644
      async def _add_reaction(self, message_id: str, emoji_type: str) -> Optional[str]:
          """Return the reaction_id on success, else None. The id is needed later for deletion."""
          if not self._client or not message_id or not emoji_type:
-@@ -3200,7 +3837,14 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -3310,7 +3895,14 @@ class FeishuAdapter(BasePlatformAdapter):
              response = await self._run_blocking(self._client.im.v1.message_reaction.create, request)
              if response and getattr(response, "success", lambda: False)():
                  data = getattr(response, "data", None)
@@ -2813,7 +2910,7 @@ index 153f2d4d0c..8a2c0173a5 100644
              logger.debug(
                  "[Feishu] Add reaction %s on %s rejected: code=%s msg=%s",
                  emoji_type,
-@@ -3230,6 +3874,11 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -3340,6 +3932,11 @@ class FeishuAdapter(BasePlatformAdapter):
              )
              response = await self._run_blocking(self._client.im.v1.message_reaction.delete, request)
              if response and getattr(response, "success", lambda: False)():
@@ -2825,7 +2922,7 @@ index 153f2d4d0c..8a2c0173a5 100644
                  return True
              logger.debug(
                  "[Feishu] Remove reaction %s on %s rejected: code=%s msg=%s",
-@@ -3263,7 +3912,10 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -3373,7 +3970,10 @@ class FeishuAdapter(BasePlatformAdapter):
          message_id = event.message_id
          if not message_id or message_id in self._pending_processing_reactions:
              return
@@ -2837,7 +2934,7 @@ index 153f2d4d0c..8a2c0173a5 100644
          if reaction_id:
              self._remember_processing_reaction(message_id, reaction_id)
  
-@@ -3276,17 +3928,53 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -3386,17 +3986,53 @@ class FeishuAdapter(BasePlatformAdapter):
          if not message_id:
              return
  
@@ -2894,7 +2991,7 @@ index 153f2d4d0c..8a2c0173a5 100644
  
      # =========================================================================
      # Webhook server and security
-@@ -3372,7 +4060,12 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -3482,7 +4118,12 @@ class FeishuAdapter(BasePlatformAdapter):
              or getattr(message, "root_id", None)
              or None
          )
@@ -2908,7 +3005,7 @@ index 153f2d4d0c..8a2c0173a5 100644
  
          sender_primary = (
              getattr(sender_id, "open_id", None)
-@@ -3392,7 +4085,6 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -3502,7 +4143,6 @@ class FeishuAdapter(BasePlatformAdapter):
              len(media_urls),
          )
  
@@ -2916,7 +3013,7 @@ index 153f2d4d0c..8a2c0173a5 100644
          chat_info = await self.get_chat_info(chat_id)
          sender_profile = await self._resolve_sender_profile(sender_id, is_bot=is_bot)
          source = self.build_source(
-@@ -4295,12 +4987,21 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -4405,12 +5045,21 @@ class FeishuAdapter(BasePlatformAdapter):
              logger.debug("[Feishu] Failed to fetch bot names for %s", bot_ids, exc_info=True)
              return None
  
@@ -2939,7 +3036,7 @@ index 153f2d4d0c..8a2c0173a5 100644
          try:
              request = self._build_get_message_request(message_id)
              response = await self._run_blocking(self._client.im.v1.message.get, request)
-@@ -4840,10 +5541,11 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -4967,10 +5616,11 @@ class FeishuAdapter(BasePlatformAdapter):
          reply_to: Optional[str],
          metadata: Optional[Dict[str, Any]],
      ) -> Any:
@@ -2954,7 +3051,7 @@ index 153f2d4d0c..8a2c0173a5 100644
          if effective_reply_to:
              body = self._build_reply_message_body(
                  content=payload,
-@@ -4857,7 +5559,7 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -4984,7 +5634,7 @@ class FeishuAdapter(BasePlatformAdapter):
          # For topic/thread messages that fell back from reply→create, use
          # thread_id as receive_id so the message lands in the topic instead of
          # the main chat.
@@ -2963,7 +3060,7 @@ index 153f2d4d0c..8a2c0173a5 100644
          if _thread_id:
              body = self._build_create_message_body(
                  receive_id=_thread_id,
-@@ -4884,6 +5586,14 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -5011,6 +5661,14 @@ class FeishuAdapter(BasePlatformAdapter):
              request = self._build_create_message_request(receive_id_type, body)
          return await self._run_blocking(self._client.im.v1.message.create, request)
  
@@ -2978,7 +3075,7 @@ index 153f2d4d0c..8a2c0173a5 100644
      @staticmethod
      def _response_succeeded(response: Any) -> bool:
          return bool(response and getattr(response, "success", lambda: False)())
-@@ -5098,8 +5808,16 @@ class FeishuAdapter(BasePlatformAdapter):
+@@ -5271,8 +5929,16 @@ class FeishuAdapter(BasePlatformAdapter):
      @staticmethod
      def _build_get_message_request(message_id: str) -> Any:
          if GetMessageRequest is not None:
@@ -3037,7 +3134,7 @@ index 4de28b8827..a457740eaf 100644
  
  def test_codex_usage_account_id_read_failure_keeps_singleton_token(monkeypatch, codex_usage_payload):
 diff --git a/tests/gateway/test_feishu.py b/tests/gateway/test_feishu.py
-index a923ea5f5d..8a6614fa80 100644
+index 2d1783e051..d076e5de4e 100644
 --- a/tests/gateway/test_feishu.py
 +++ b/tests/gateway/test_feishu.py
 @@ -68,6 +68,31 @@ class TestConfigEnvOverrides(unittest.TestCase):
@@ -3133,7 +3230,7 @@ index a923ea5f5d..8a6614fa80 100644
  
  
      @patch.dict(os.environ, {}, clear=True)
-@@ -1861,17 +1908,52 @@ class TestProcessingReactions(unittest.TestCase):
+@@ -1916,17 +1963,52 @@ class TestProcessingReactions(unittest.TestCase):
  
      # --------------------------------------------------------------- complete
      @patch.dict(os.environ, {}, clear=True)
@@ -3188,7 +3285,7 @@ index a923ea5f5d..8a6614fa80 100644
      @patch.dict(os.environ, {}, clear=True)
      def test_failure_removes_typing_then_adds_cross_mark(self):
          adapter, tracker = self._build_adapter(next_reaction_id="r_typing")
-@@ -2266,6 +2348,31 @@ class TestFeishuProcessInboundMessage(unittest.TestCase):
+@@ -2321,6 +2403,31 @@ class TestFeishuProcessInboundMessage(unittest.TestCase):
          self.assertIn("[Mentioned: Alice (open_id=ou_alice), Bob (open_id=ou_bob)]", event.text)
          self.assertIn("@Alice @Bob make a group", event.text)
  
@@ -3220,7 +3317,7 @@ index a923ea5f5d..8a6614fa80 100644
      def test_command_message_never_injects_hint(self):
          adapter = self._build_adapter()
          bot_mention = SimpleNamespace(
-@@ -2342,6 +2449,51 @@ class TestFeishuFetchMessageText(unittest.TestCase):
+@@ -2397,6 +2504,51 @@ class TestFeishuFetchMessageText(unittest.TestCase):
          result = asyncio.run(adapter._fetch_message_text("m_parent"))
          self.assertEqual(result, "@Hermes hi")
  
@@ -3272,7 +3369,7 @@ index a923ea5f5d..8a6614fa80 100644
  
  class TestFeishuMentionEndToEnd(unittest.TestCase):
      """High-level scenarios from the design spec — verify the full pipeline."""
-@@ -2465,5 +2617,3 @@ class TestChatLockEviction(unittest.TestCase):
+@@ -2520,5 +2672,3 @@ class TestChatLockEviction(unittest.TestCase):
  
          adapter = self._make_adapter()
          self.assertIsInstance(adapter._chat_locks, _collections.OrderedDict)
@@ -3332,7 +3429,7 @@ index 6a372f3f64..8321131dc9 100644
 +        ("complete", "m-1", ProcessingOutcome.FAILURE),
      ]
 diff --git a/tests/gateway/test_weixin.py b/tests/gateway/test_weixin.py
-index ed20aeb8f3..04c94f8a92 100644
+index 936fef0f3e..f740bb65b7 100644
 --- a/tests/gateway/test_weixin.py
 +++ b/tests/gateway/test_weixin.py
 @@ -4,6 +4,7 @@ import asyncio
@@ -3376,7 +3473,7 @@ index ed20aeb8f3..04c94f8a92 100644
  
  class TestWeixinStatePersistence:
      def test_save_weixin_account_preserves_existing_file_on_replace_failure(self, tmp_path, monkeypatch):
-@@ -320,9 +347,12 @@ class TestWeixinOutboundMedia:
+@@ -371,9 +398,12 @@ class TestWeixinOutboundMedia:
  
          with patch("gateway.platforms.weixin._get_upload_url", new=AsyncMock(return_value={"upload_full_url": "https://upload.example.com/media"})), \
               patch("gateway.platforms.weixin._api_post", new_callable=AsyncMock) as api_post_mock, \
@@ -3390,7 +3487,7 @@ index ed20aeb8f3..04c94f8a92 100644
  
          assert message_id.startswith("hermes-weixin-")
          assert len(session.post_calls) == 1
-@@ -334,9 +364,115 @@ class TestWeixinOutboundMedia:
+@@ -385,9 +415,119 @@ class TestWeixinOutboundMedia:
          # aiohttp.ClientTimeout, so it no longer appears as a post() kwarg.
          assert "timeout" not in upload_kwargs
          payload = api_post_mock.await_args.kwargs["payload"]
@@ -3434,7 +3531,11 @@ index ed20aeb8f3..04c94f8a92 100644
 +        adapter._send_session = object()
 +        adapter._token = "test-token"
 +        adapter._base_url = "https://weixin.example.com"
-+        adapter._token_store.set("test-account", "wxid_test123", "stale-context")
++        asyncio.run(
++            adapter._token_store.set(
++                "test-account", "wxid_test123", "stale-context"
++            )
++        )
 +
 +        with patch(
 +            "gateway.platforms.weixin._get_upload_url",
@@ -3507,7 +3608,7 @@ index ed20aeb8f3..04c94f8a92 100644
  
  
  class TestWeixinRemoteMediaSafety:
-@@ -457,6 +593,64 @@ class TestWeixinSendImageFileParameterName:
+@@ -508,6 +648,64 @@ class TestWeixinSendImageFileParameterName:
              metadata={"thread_id": "thread-123"},
          )
  
@@ -3572,16 +3673,108 @@ index ed20aeb8f3..04c94f8a92 100644
  
  class TestWeixinVoiceSending:
      def _connected_adapter(self) -> WeixinAdapter:
-@@ -827,4 +1021,3 @@ class TestWeixinVoiceGatewayHandoff:
+@@ -878,4 +1076,3 @@ class TestWeixinVoiceGatewayHandoff:
              "VOICE event body leaked Tencent's STT text — runner would trust "
              "the wrong transcript instead of re-transcribing (#27300)."
          )
 -
+diff --git a/tests/hermes_cli/test_companion_cli_updates.py b/tests/hermes_cli/test_companion_cli_updates.py
+new file mode 100644
+index 0000000000..85f0ba45ae
+--- /dev/null
++++ b/tests/hermes_cli/test_companion_cli_updates.py
+@@ -0,0 +1,86 @@
++"""Regression tests for chat-triggered companion CLI updates."""
++
++from __future__ import annotations
++
++import json
++import subprocess
++from pathlib import Path
++from unittest.mock import Mock, patch
++
++from hermes_cli import companion_cli_updates as companion
++
++
++def test_discover_outdated_npm_clis_keeps_only_real_cli_packages(tmp_path: Path):
++    root = tmp_path / "node_modules"
++    cli_dir = root / "example-cli"
++    library_dir = root / "example-library"
++    excluded_dir = root / "@colinlu50" / "openclaw-lark-stream"
++    cli_dir.mkdir(parents=True)
++    library_dir.mkdir(parents=True)
++    excluded_dir.mkdir(parents=True)
++    (cli_dir / "package.json").write_text(
++        json.dumps({"bin": {"example": "bin/example.js"}}), encoding="utf-8"
++    )
++    (library_dir / "package.json").write_text(
++        json.dumps({"name": "example-library"}), encoding="utf-8"
++    )
++    (excluded_dir / "package.json").write_text(
++        json.dumps({"bin": {"lark-stream": "bin/install.js"}}), encoding="utf-8"
++    )
++    payload = {
++        "example-cli": {"current": "1.0.0", "latest": "2.0.0"},
++        "example-library": {"current": "1.0.0", "latest": "2.0.0"},
++        "@colinlu50/openclaw-lark-stream": {
++            "current": "1.0.0",
++            "latest": "2.0.0",
++        },
++    }
++    run = Mock(
++        return_value=subprocess.CompletedProcess(
++            args=[], returncode=1, stdout=json.dumps(payload), stderr=""
++        )
++    )
++
++    discovered = companion.discover_outdated_npm_clis(
++        npm="npm", npm_root=root, run=run
++    )
++
++    assert list(discovered) == ["example-cli"]
++
++
++def test_missing_agent_browser_is_not_installed_implicitly(tmp_path: Path):
++    with (
++        patch.object(companion, "_npm_root", return_value=tmp_path),
++        patch.object(companion.shutil, "which", return_value=None),
++        patch.object(companion, "_run") as run,
++    ):
++        repaired = companion._ensure_agent_browser_entrypoint(
++            npm="npm", env={}
++        )
++
++    assert repaired is False
++    run.assert_not_called()
++
++
++def test_companion_failure_does_not_abort_hermes_update(capsys):
++    with (
++        patch.object(companion, "companion_cli_updates_enabled", return_value=True),
++        patch.object(
++            companion,
++            "update_companion_clis",
++            side_effect=RuntimeError("registry unavailable"),
++        ),
++    ):
++        result = companion.maybe_update_companion_clis(gateway_mode=True)
++
++    assert result == []
++    output = capsys.readouterr().out
++    assert "Companion CLI update incomplete" in output
++    assert "registry unavailable" in output
++
++
++def test_companion_update_is_skipped_outside_gateway_mode():
++    with patch.object(companion, "update_companion_clis") as update:
++        assert companion.maybe_update_companion_clis(gateway_mode=False) == []
++
++    update.assert_not_called()
 diff --git a/tools/delegate_tool.py b/tools/delegate_tool.py
-index e459344a83..b547cd4c36 100644
+index 796487f041..8f0858600f 100644
 --- a/tools/delegate_tool.py
 +++ b/tools/delegate_tool.py
-@@ -3896,6 +3896,34 @@ def delegate_task(
+@@ -4008,6 +4008,34 @@ def delegate_task(
  
      # Load config
      cfg = _load_config()
@@ -3657,277 +3850,3 @@ index 11a7bf40c2..65b9af59e4 100644
          return await send_weixin_direct(
              extra=pconfig.extra,
              token=pconfig.token,
-diff --git a/hermes_cli/companion_cli_updates.py b/hermes_cli/companion_cli_updates.py
-new file mode 100644
-index 0000000000..fcc09e1c5a
---- /dev/null
-+++ b/hermes_cli/companion_cli_updates.py
-@@ -0,0 +1,268 @@
-+"""Update installed command-line companions used alongside Hermes."""
-+
-+from __future__ import annotations
-+
-+import json
-+import os
-+import re
-+import shutil
-+import subprocess
-+import tempfile
-+from datetime import datetime, timezone
-+from pathlib import Path
-+from typing import Callable, Mapping, Optional
-+
-+
-+_RUNTIME_PACKAGE_EXCLUSIONS = {
-+    # This package is the live Feishu gateway plugin, not merely a CLI. It has
-+    # its own compatibility lifecycle and must not be swept up by generic CLI
-+    # updates just because it exposes an installer binary.
-+    "@colinlu50/openclaw-lark-stream",
-+}
-+
-+
-+def companion_cli_updates_enabled() -> bool:
-+    try:
-+        from hermes_cli.config import load_config
-+
-+        updates = (load_config() or {}).get("updates", {})
-+        value = updates.get("update_companion_clis", False) if isinstance(updates, dict) else False
-+    except Exception:
-+        return False
-+    if isinstance(value, str):
-+        return value.strip().lower() not in {"0", "false", "no", "off"}
-+    return bool(value)
-+
-+
-+def _npm_root(npm: str, run: Callable = subprocess.run) -> Optional[Path]:
-+    result = run([npm, "root", "-g"], capture_output=True, text=True, check=False)
-+    if result.returncode != 0 or not result.stdout.strip():
-+        return None
-+    return Path(result.stdout.strip())
-+
-+
-+def discover_outdated_npm_clis(
-+    *,
-+    npm: str,
-+    npm_root: Optional[Path] = None,
-+    run: Callable = subprocess.run,
-+) -> dict[str, Mapping[str, object]]:
-+    """Return outdated global npm packages that actually expose CLI bins."""
-+    result = run(
-+        [npm, "outdated", "-g", "--json"],
-+        capture_output=True,
-+        text=True,
-+        check=False,
-+    )
-+    raw = result.stdout.strip() or "{}"
-+    try:
-+        payload = json.loads(raw)
-+    except json.JSONDecodeError:
-+        return {}
-+    if not isinstance(payload, dict):
-+        return {}
-+
-+    root = Path(npm_root) if npm_root is not None else _npm_root(npm, run=run)
-+    if root is None:
-+        return {}
-+    discovered: dict[str, Mapping[str, object]] = {}
-+    for name, metadata in payload.items():
-+        if name in _RUNTIME_PACKAGE_EXCLUSIONS or not isinstance(metadata, dict):
-+            continue
-+        manifest = root / name / "package.json"
-+        try:
-+            package = json.loads(manifest.read_text(encoding="utf-8"))
-+        except (OSError, json.JSONDecodeError):
-+            continue
-+        if package.get("bin"):
-+            discovered[name] = metadata
-+    return discovered
-+
-+
-+def sync_lark_skills_state(state_path: Path, version: str) -> None:
-+    """Stamp lark's state file after the official skills installer succeeds."""
-+    path = Path(state_path)
-+    try:
-+        payload = json.loads(path.read_text(encoding="utf-8"))
-+    except (OSError, json.JSONDecodeError):
-+        return
-+    if not isinstance(payload, dict):
-+        return
-+    payload["version"] = version
-+    payload["updated_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-+    path.parent.mkdir(parents=True, exist_ok=True)
-+    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
-+    try:
-+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-+            json.dump(payload, handle, ensure_ascii=False, indent=2)
-+            handle.write("\n")
-+        os.replace(tmp_name, path)
-+    except Exception:
-+        try:
-+            os.unlink(tmp_name)
-+        except OSError:
-+            pass
-+        raise
-+
-+
-+def _tail(result: subprocess.CompletedProcess[str]) -> str:
-+    text = (result.stderr or result.stdout or "").strip().splitlines()
-+    return text[-1] if text else f"exit {result.returncode}"
-+
-+
-+def _run(
-+    command: list[str],
-+    *,
-+    env: dict[str, str],
-+    timeout: int = 600,
-+) -> subprocess.CompletedProcess[str]:
-+    return subprocess.run(
-+        command,
-+        capture_output=True,
-+        text=True,
-+        check=False,
-+        timeout=timeout,
-+        env=env,
-+    )
-+
-+
-+def _lark_version(lark: str, env: dict[str, str]) -> str:
-+    result = _run([lark, "--version"], env=env, timeout=30)
-+    match = re.search(r"(\d+\.\d+\.\d+)", result.stdout or result.stderr or "")
-+    return match.group(1) if match else ""
-+
-+
-+def _ensure_lark_skills_synced(
-+    *,
-+    lark: str,
-+    npx: Optional[str],
-+    env: dict[str, str],
-+) -> None:
-+    check = _run([lark, "update", "--check", "--json"], env=env, timeout=120)
-+    try:
-+        payload = json.loads(check.stdout or "{}")
-+    except json.JSONDecodeError:
-+        payload = {}
-+    skills = payload.get("skills_status", {}) if isinstance(payload, dict) else {}
-+    if check.returncode == 0 and isinstance(skills, dict) and skills.get("in_sync") is not False:
-+        return
-+    if not npx:
-+        raise RuntimeError("lark-cli Skills are out of sync and npx is unavailable")
-+    install = _run([npx, "-y", "skills", "add", "larksuite/cli", "-y", "-g"], env=env)
-+    if install.returncode != 0:
-+        raise RuntimeError(f"lark-cli Skills sync failed: {_tail(install)}")
-+    version = _lark_version(lark, env)
-+    if version:
-+        sync_lark_skills_state(Path.home() / ".lark-cli" / "skills-state.json", version)
-+    verify = _run([lark, "update", "--check", "--json"], env=env, timeout=120)
-+    try:
-+        verified = json.loads(verify.stdout or "{}")
-+    except json.JSONDecodeError:
-+        verified = {}
-+    verified_skills = verified.get("skills_status", {}) if isinstance(verified, dict) else {}
-+    if verify.returncode != 0 or not isinstance(verified_skills, dict) or not verified_skills.get("in_sync"):
-+        raise RuntimeError("lark-cli Skills remain out of sync after reinstall")
-+
-+
-+def _ensure_agent_browser_entrypoint(
-+    *,
-+    npm: str,
-+    env: dict[str, str],
-+) -> bool:
-+    """Repair the dangling global shim that `hermes update` can leave behind."""
-+    root = _npm_root(npm)
-+    manifest = root / "agent-browser" / "package.json" if root else None
-+    executable = shutil.which("agent-browser")
-+    if manifest and manifest.is_file() and executable:
-+        verify = _run([executable, "--version"], env=env, timeout=30)
-+        if verify.returncode == 0:
-+            return False
-+
-+    no_browser_env = dict(env)
-+    no_browser_env["npm_config_ignore_scripts"] = "true"
-+    repair = _run(
-+        [npm, "install", "-g", "agent-browser@latest"],
-+        env=no_browser_env,
-+    )
-+    if repair.returncode != 0:
-+        raise RuntimeError(f"agent-browser entrypoint repair failed: {_tail(repair)}")
-+    executable = shutil.which("agent-browser")
-+    if not executable:
-+        raise RuntimeError("agent-browser entrypoint remains unavailable after repair")
-+    verify = _run([executable, "--version"], env=env, timeout=30)
-+    if verify.returncode != 0:
-+        raise RuntimeError(f"agent-browser remains unusable after repair: {_tail(verify)}")
-+    return True
-+
-+
-+def update_companion_clis(*, print_fn: Callable[[str], None] = print) -> list[str]:
-+    """Update every outdated installed npm CLI, with tool-specific guards."""
-+    npm = shutil.which("npm")
-+    if not npm:
-+        raise RuntimeError("npm is unavailable; companion CLIs cannot be checked")
-+    npx = shutil.which("npx")
-+    env = dict(os.environ)
-+    env["LARKSUITE_CLI_NO_UPDATE_NOTIFIER"] = "1"
-+    env["LARKSUITE_CLI_NO_SKILLS_NOTIFIER"] = "1"
-+    outdated = discover_outdated_npm_clis(npm=npm)
-+    updated: list[str] = []
-+
-+    # npm updates its own executable tree, so update it after every other CLI.
-+    for package in sorted(outdated, key=lambda item: item == "npm"):
-+        print_fn(f"  → Updating {package}...")
-+        if package == "@openai/codex" and shutil.which("codex"):
-+            result = _run([shutil.which("codex") or "codex", "update"], env=env)
-+            if result.returncode != 0:
-+                result = _run([npm, "install", "-g", f"{package}@latest"], env=env)
-+        elif package == "@larksuite/cli" and shutil.which("lark-cli"):
-+            lark = shutil.which("lark-cli") or "lark-cli"
-+            result = _run([lark, "update", "--json"], env=env)
-+            if result.returncode != 0:
-+                result = _run([npm, "install", "-g", f"{package}@latest"], env=env)
-+        elif package == "agent-browser":
-+            no_browser_env = dict(env)
-+            no_browser_env["npm_config_ignore_scripts"] = "true"
-+            result = _run([npm, "install", "-g", f"{package}@latest"], env=no_browser_env)
-+        else:
-+            result = _run([npm, "install", "-g", f"{package}@latest"], env=env)
-+        if result.returncode != 0:
-+            raise RuntimeError(f"{package} update failed: {_tail(result)}")
-+
-+        if package == "@anthropic-ai/claude-code" and shutil.which("claude"):
-+            verify = _run([shutil.which("claude") or "claude", "--version"], env=env, timeout=30)
-+            if verify.returncode != 0:
-+                root = _npm_root(npm)
-+                installer = root / package / "install.cjs" if root else None
-+                node = shutil.which("node")
-+                if not installer or not installer.is_file() or not node:
-+                    raise RuntimeError("Claude Code native binary is missing after update")
-+                install_native = _run([node, str(installer)], env=env, timeout=300)
-+                if install_native.returncode != 0:
-+                    raise RuntimeError(f"Claude Code native install failed: {_tail(install_native)}")
-+        updated.append(package)
-+
-+    lark = shutil.which("lark-cli")
-+    if lark:
-+        _ensure_lark_skills_synced(lark=lark, npx=npx, env=env)
-+
-+    if _ensure_agent_browser_entrypoint(npm=npm, env=env):
-+        if "agent-browser" not in updated:
-+            updated.append("agent-browser")
-+        print_fn("  ✓ Repaired agent-browser CLI entrypoint (Chromium install skipped)")
-+
-+    remaining = discover_outdated_npm_clis(npm=npm)
-+    if remaining:
-+        raise RuntimeError("CLI updates remain pending: " + ", ".join(remaining))
-+    if updated:
-+        print_fn(f"  ✓ Updated {len(updated)} companion CLI(s)")
-+    else:
-+        print_fn("  ✓ Companion CLIs are up to date")
-+    return updated
-+
-+
-+def maybe_update_companion_clis(gateway_mode: bool) -> list[str]:
-+    """Update companion CLIs only for chat-triggered update runs."""
-+    if not gateway_mode or not companion_cli_updates_enabled():
-+        return []
-+    print("\n→ Updating companion CLIs...")
-+    return update_companion_clis()

@@ -4,7 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 HERMES_REPO="${HERMES_REPO:-$HERMES_HOME/hermes-agent}"
-PATCH="$ROOT/patches/0001-runtime-experience.patch"
+PATCHES=(
+  "$ROOT/patches/0001-runtime-experience-f98f5e7.patch"
+  "$ROOT/patches/0002-runtime-experience-c3e9b28.patch"
+)
 PLUGIN_SOURCE="$ROOT/plugins/openclaw-lark-stream"
 PLUGIN_DIR="$HERMES_HOME/plugins/openclaw-lark-stream"
 WEIXIN_PLUGIN_SOURCE="$ROOT/plugins/weixin-experience"
@@ -12,6 +15,8 @@ WEIXIN_PLUGIN_DIR="$HERMES_HOME/plugins/weixin-experience"
 SKILL_DIR="$HERMES_HOME/skills/productivity/luckin-cli-ordering"
 IONBRIDGE_SOURCE="$ROOT/skills/ionbridge-mcp"
 IONBRIDGE_DIR="$HERMES_HOME/skills/openclaw-imports/ionbridge-mcp"
+AI_NEWS_SOURCE="$ROOT/skills/ai-news-workflow"
+AI_NEWS_DIR="$HERMES_HOME/skills/openclaw-imports/ai-news-workflow"
 IMPORTED_LARK_DOC="$HERMES_HOME/skills/openclaw-imports/lark-doc"
 IMPORTED_LARK_DOC_ALIAS="$HERMES_HOME/skills/openclaw-imports/openclaw-lark-doc"
 SUPPRESSED="$ROOT/config/suppressed-skills.txt"
@@ -27,13 +32,31 @@ command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 git -C "$HERMES_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
   || fail "$HERMES_REPO is not a Hermes git checkout"
 
-if git -C "$HERMES_REPO" apply --check --reverse "$PATCH" >/dev/null 2>&1; then
+PATCH=""
+PATCH_ALREADY_APPLIED=false
+for candidate in "${PATCHES[@]}"; do
+  if git -C "$HERMES_REPO" apply --check --reverse "$candidate" >/dev/null 2>&1; then
+    PATCH="$candidate"
+    PATCH_ALREADY_APPLIED=true
+    break
+  fi
+done
+if [[ -z "$PATCH" ]]; then
+  for candidate in "${PATCHES[@]}"; do
+    if git -C "$HERMES_REPO" apply --check "$candidate" >/dev/null 2>&1; then
+      PATCH="$candidate"
+      break
+    fi
+  done
+fi
+[[ -n "$PATCH" ]] \
+  || fail "no verified runtime overlay matches this checkout; refusing a forced apply"
+
+if [[ "$PATCH_ALREADY_APPLIED" == true ]]; then
   printf 'Hermes runtime overlay is already applied.\n'
-elif git -C "$HERMES_REPO" apply --check "$PATCH" >/dev/null 2>&1; then
-  git -C "$HERMES_REPO" apply "$PATCH"
-  printf 'Applied Hermes runtime overlay.\n'
 else
-  fail "runtime overlay does not match this checkout; refusing a forced apply"
+  git -C "$HERMES_REPO" apply "$PATCH"
+  printf 'Applied Hermes runtime overlay: %s\n' "$(basename "$PATCH")"
 fi
 
 PLUGIN_REPO="$(tr -d '\r\n' < "$PLUGIN_SOURCE/UPSTREAM_REPOSITORY")"
@@ -67,6 +90,8 @@ rsync -a --delete --exclude '__pycache__/' --exclude '*.pyc' \
   "$ROOT/skills/luckin-cli-ordering/" "$SKILL_DIR/"
 mkdir -p "$IONBRIDGE_DIR"
 rsync -a --delete "$IONBRIDGE_SOURCE/" "$IONBRIDGE_DIR/"
+mkdir -p "$AI_NEWS_DIR"
+rsync -a --delete "$AI_NEWS_SOURCE/" "$AI_NEWS_DIR/"
 for profile_root in "$HERMES_HOME"/profiles/*; do
   [[ -d "$profile_root" ]] || continue
   profile_ionbridge="$profile_root/skills/openclaw-imports/ionbridge-mcp"
@@ -109,6 +134,14 @@ if [[ -f "$HERMES_HOME/workspace/AGENTS.md" ]]; then
     "$HERMES_HOME/workspace/AGENTS.md"
 fi
 
-printf 'Restored messaging overlays, skills, aliases, and workspace rules.\n'
+PYTHON="$HERMES_REPO/venv/bin/python"
+[[ -x "$PYTHON" ]] || PYTHON="$(command -v python3)"
+if [[ -f "$HERMES_HOME/cron/jobs.json" ]]; then
+  HERMES_HOME="$HERMES_HOME" PYTHONPATH="$HERMES_REPO" \
+    "$PYTHON" "$ROOT/scripts/normalize_cron_jobs.py" \
+    --hermes-repo "$HERMES_REPO"
+fi
+
+printf 'Restored messaging overlays, cron guardrails, skills, aliases, and workspace rules.\n'
 HERMES_HOME="$HERMES_HOME" HERMES_REPO="$HERMES_REPO" "$ROOT/verify.sh"
 printf 'Restore verified. Gateway was not restarted.\n'
