@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,40 @@ PRESETS: dict[str, dict[str, Any]] = {
         ],
     }
 }
+
+_TRANSIENT_READ_ERRORS = (
+    "eof",
+    "timeout",
+    "timed out",
+    "connection reset",
+    "server disconnected",
+    "temporary failure",
+    "remote end closed",
+    "cannot connect",
+)
+
+
+def run_read_only_luckin(
+    command: list[str],
+    *,
+    timeout: float,
+    retries: int = 2,
+) -> subprocess.CompletedProcess[str]:
+    """Retry transient failures only for commands without side effects."""
+    for attempt in range(retries + 1):
+        try:
+            result = run(command, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            if attempt >= retries:
+                raise
+        else:
+            if result.returncode == 0:
+                return result
+            error = f"{result.stderr}\n{result.stdout}".lower()
+            if attempt >= retries or not any(marker in error for marker in _TRANSIENT_READ_ERRORS):
+                return result
+        time.sleep(attempt + 1)
+    raise RuntimeError("unreachable Luckin retry state")
 
 
 def pending_preview_path(target: str, root: Path | None = None) -> Path:
@@ -133,7 +168,10 @@ def main() -> None:
     preset = PRESETS[args.preset]
     store = read_default_store(args.store_file)
     products = parse_luckin_stdout(
-        run(["luckin", "product", str(store["deptId"]), preset["query"]], timeout=30)
+        run_read_only_luckin(
+            ["luckin", "product", str(store["deptId"]), preset["query"]],
+            timeout=30,
+        )
     )
     if not any(
         int(item.get("productId") or 0) == int(preset["product_id"])
@@ -144,7 +182,7 @@ def main() -> None:
 
     product_arg = f"{preset['product_id']}:{preset['sku_code']}:{preset['amount']}"
     preview = parse_luckin_stdout(
-        run(
+        run_read_only_luckin(
             ["luckin", "order", "preview", str(store["deptId"]), "-p", product_arg],
             timeout=45,
         )

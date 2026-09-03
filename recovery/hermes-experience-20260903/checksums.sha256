@@ -1,9 +1,9 @@
-6cca5acf13eea9ba5958bead9a4be1a9b24c16b9f4a796ef83d2247352183bdd  ./README.md
+ead4d3d91eaa5f9892cbab734c991cb947b6e30c16d30e92057c0e17a3577088  ./README.md
 92a136442abdc17f1a6ce374305a9aa6c06cfd2ba01f4ba6e1664ee5e1385f67  ./config/codex-capability-alignment.example.yaml
 116f92be1c3751e506ec8d3281a84fa7c0dcef362882c5e0fcbbef9c3ee4a55e  ./config/feishu.example.yaml
 08935663774dc30318abb8e86374fa188f5fd7a186b15f1dd3687d96a1440417  ./config/ionbridge.example.yaml
 57a3ee9f434ce3e5dc3396cb720121cfd7d68b2bee8d70168aa76d27166ad88e  ./config/suppressed-skills.txt
-951f3b9d6c1c3b94b4fbbedfcdfee8cfbd5516db52cd01658e10abd7b445c1fa  ./manifest.json
+e96c66f01464acdefefa120c2809c0fe0218e143c1a4d08c7be9cd224c006b2e  ./manifest.json
 1efb56ad8a1b94808984e6b810b37cb0669900f69dd0e9270d0025a7b382e443  ./patches/0001-runtime-experience.patch
 053d86cb7623a1bd3f91f1114a4ff0514e19af5fcd7bfb672ac867be6a7c6f50  ./plugins/openclaw-lark-stream/UPSTREAM_COMMIT
 19048a27ba95864cb455b1dc6116c7cedaf4237b16c66be081cbe17d934bcf34  ./plugins/openclaw-lark-stream/UPSTREAM_REPOSITORY
@@ -15,7 +15,7 @@ d51fba26c222fb906e3831b5e93855506986e1ddaa92a14e025360324782a88b  ./plugins/weix
 3a37e89170e4220ef9b25bec9ca6f255d4fa1acd03801b5895bbbfd1f8dd9785  ./restore.sh
 6ebe77ccfbbdb09e22e52840f4fea0d85a328ce548289fa835b7cc184ae0a6b1  ./scripts/normalize_workspace_rules.py
 9992b8cba770533dca9b23cd35fe3b249febbea624536549a2dc3df4919461c7  ./skills/ionbridge-mcp/SKILL.md
-4d6f60f0e080755e6016e157900ff121d37ac8ee4cc494ccb1c1462e49c52d0b  ./skills/luckin-cli-ordering/SKILL.md
+5eec3c0280302f798ca9d92ed1c803f92d375360b6d04796c74839cdd4538cc7  ./skills/luckin-cli-ordering/SKILL.md
 a6807163f7c155f31864dda12cb0af44987a057beb23e70aea286af2f50881dc  ./skills/luckin-cli-ordering/references/attribute-switching-via-mcp.md
 33f854c2721b40e58f024ff5c102fe9a80a5bbe9a33a20f81503d738e88490c8  ./skills/luckin-cli-ordering/references/default-store-and-coupon-order.md
 c5aed3565eed1a7a3b0fff05b9ededf2e6e47951b4afb8fe523574c69a129c6a  ./skills/luckin-cli-ordering/references/feishu-payment-qr-pitfalls.md
@@ -27,7 +27,7 @@ ae69d0d3874b5cf628b3fd96fecc8a4197d80c9c2eb4a88b70f671f0f81b58c2  ./skills/lucki
 981c6edefe14ab3ab880bead953368fbb94bbb7e2cdeb9b8a92bfd2c6bdd32c3  ./skills/luckin-cli-ordering/references/store-default-update-playbook.md
 9f59a9ce80a71d6847f71b2bde9b82505b8d09043842c93443fe779d6a2641c9  ./skills/luckin-cli-ordering/scripts/confirm_luckin_order_fast.py
 262048dafafa1aea86e7c06c3502317c48efd8d9420aa7d05ec7d5c9841f8161  ./skills/luckin-cli-ordering/scripts/create_luckin_order_fast.py
-7645ea077a722ea2deaf25f3e0678bb15e05d0d067bf82fa6f4574969cd77773  ./skills/luckin-cli-ordering/scripts/prepare_luckin_order_fast.py
+ac31303352da26d389124ddc3fac658bd7c049279d6e39a076ce4fe45db21fb7  ./skills/luckin-cli-ordering/scripts/prepare_luckin_order_fast.py
 97c6c0e2bf2230f136c900f0c180b5f903ff944ade2dffb5a2357fd03249e5b3  ./skills/luckin-cli-ordering/scripts/watch_luckin_order.py
-0637cb5321f5c70836e1a0774884ac065315f963206cdd192e6b3eee0ede9ffe  ./skills/luckin-cli-ordering/tests/test_delivery_manifest.py
+7e4cd8dece45ccf76b563e567639d7ba135310779fffbe45375d19ad7c2ee913  ./skills/luckin-cli-ordering/tests/test_delivery_manifest.py
 72146eeed60fd010ab47997c928621727c8801cc8c52e1d6578a99eff5f83c80  ./verify.sh

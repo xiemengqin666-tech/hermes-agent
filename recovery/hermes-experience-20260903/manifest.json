@@ -16,11 +16,13 @@
     "wrapper_version": "260330.1.2"
   },
   "luckin_skill": {
-    "version": "2.1.1",
+    "version": "2.1.2",
     "model_guided": true,
     "durable_preview_seconds": 900,
     "atomic_confirmation": true,
-    "expired_preview_requires_refresh": true
+    "expired_preview_requires_refresh": true,
+    "read_only_transient_retries": 2,
+    "create_retries": 0
   },
   "weixin_experience": {
     "version": "1.1.1",

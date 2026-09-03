@@ -33,7 +33,7 @@ compatible with the official updater.
 - Feishu stream source: `ColinLu50/openclaw-lark-stream` commit
   `8d89a01b0057411c1d005f71dbcd70ef2b5c3687`
 - Weixin experience plugin: `1.1.1`
-- Luckin skill: `2.1.1`
+- Luckin skill: `2.1.2`
 
 ## Restore
 
@@ -64,7 +64,8 @@ Credentials, sessions, orders, chat IDs, and logs are never overwritten.
   across `/new`. Confirmation is atomically claimed to prevent duplicate paid
   orders, then one reply carries the payment QR. An expired preview is refreshed
   and requires a new confirmation instead of silently losing context or using an
-  old price.
+  old price. Transient EOF/timeouts are retried only for read-only product and
+  preview calls; order creation is never blindly retried.
 - Legacy workspace rules no longer force browser/image searches or a manual
   skill-usage terminal call during Luckin ordering.
 - `/update` uses official autostash and also checks companion CLIs without

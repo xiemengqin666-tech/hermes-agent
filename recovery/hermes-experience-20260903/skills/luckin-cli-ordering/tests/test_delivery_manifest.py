@@ -88,6 +88,47 @@ def test_prepare_preview_rejects_wrong_attributes():
         raise AssertionError("wrong attributes must be rejected")
 
 
+def test_prepare_retries_transient_read_only_failure(monkeypatch):
+    module = _load_script("prepare_luckin_order_fast.py")
+    calls = []
+    responses = iter(
+        [
+            subprocess.CompletedProcess([], 1, stdout="", stderr="remote MCP: EOF"),
+            subprocess.CompletedProcess([], 0, stdout='{"success":true}', stderr=""),
+        ]
+    )
+
+    def fake_run(command, timeout):
+        calls.append((command, timeout))
+        return next(responses)
+
+    sleeps = []
+    monkeypatch.setattr(module, "run", fake_run)
+    monkeypatch.setattr(module.time, "sleep", sleeps.append)
+
+    result = module.run_read_only_luckin(["luckin", "order", "preview"], timeout=45)
+
+    assert result.returncode == 0
+    assert len(calls) == 2
+    assert sleeps == [1]
+
+
+def test_prepare_does_not_retry_nontransient_failure(monkeypatch):
+    module = _load_script("prepare_luckin_order_fast.py")
+    calls = []
+
+    def fake_run(command, timeout):
+        calls.append((command, timeout))
+        return subprocess.CompletedProcess([], 1, stdout="", stderr="invalid product")
+
+    monkeypatch.setattr(module, "run", fake_run)
+
+    result = module.run_read_only_luckin(["luckin", "product"], timeout=30)
+
+    assert result.returncode == 1
+    assert len(calls) == 1
+
+
 def test_confirm_builds_one_create_command_from_pending_preview(tmp_path):
     module = _load_script("confirm_luckin_order_fast.py")
     payload = {

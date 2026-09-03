@@ -1,7 +1,7 @@
 ---
 name: luckin-cli-ordering
 description: "Use whenever a message mentions 瑞幸/Luckin, including product questions, store lookup, drink selection, order preview, confirmation, payment QR delivery, and status watching."
-version: 2.1.1
+version: 2.1.2
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -39,6 +39,8 @@ python3 ~/.hermes/skills/productivity/luckin-cli-ordering/scripts/prepare_luckin
 ```
 
 Relay only the returned `replyText`. Do not reload this skill or its reference, and do not run a separate product/menu/preview command for this preset.
+
+The prepare helper retries transient EOF/timeout failures for its read-only product and preview calls. Order creation has side effects and is deliberately never retried automatically.
 
 When the next user message is `确认` or `确认下单`, including after `/new`, run exactly one command:
 
