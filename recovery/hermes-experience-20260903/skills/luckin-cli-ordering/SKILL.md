@@ -1,7 +1,7 @@
 ---
 name: luckin-cli-ordering
 description: "Use whenever a message mentions 瑞幸/Luckin, including product questions, store lookup, drink selection, order preview, confirmation, payment QR delivery, and status watching."
-version: 2.1.0
+version: 2.1.1
 author: Hermes Agent
 license: MIT
 platforms: [macos, linux]
@@ -48,6 +48,8 @@ python3 ~/.hermes/skills/productivity/luckin-cli-ordering/scripts/confirm_luckin
 ```
 
 The confirmation helper atomically claims the saved preview, creates at most one order, verifies it, starts the watcher and returns `replyText` containing the payment QR. Relay only that `replyText`; do not append store, order number, tool output or another acknowledgement.
+
+If the saved preview has expired, never create from it. Run the same prepare command once, relay only the fresh `replyText`, and wait for a new confirmation. This rule also applies after `/new`.
 
 ## 1. Resolve store
 

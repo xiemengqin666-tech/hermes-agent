@@ -140,6 +140,29 @@ def test_confirmation_ignores_expired_or_other_chat_preview(tmp_path):
     assert _luckin_workflow_prompt("确认", "chat-a", previews) is None
 
 
+def test_confirmation_refreshes_expired_preview_after_new(tmp_path):
+    previews = tmp_path / "pending"
+    previews.mkdir()
+    (previews / "preview.json").write_text(
+        json.dumps(
+            {
+                "target": "weixin:chat-a",
+                "status": "prepared",
+                "preset": "grape-ice-tea-xl-no-sugar",
+                "expiresAt": time.time() - 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    prompt = _luckin_workflow_prompt("确认下单", "chat-a", previews)
+
+    assert "expired Luckin preview" in prompt
+    assert "prepare_luckin_order_fast.py" in prompt
+    assert "confirm again" in prompt
+    assert "Do not create an order" in prompt
+
+
 @pytest.mark.asyncio
 async def test_handle_message_injects_luckin_prompt_without_bypassing_model(monkeypatch):
     @dataclass

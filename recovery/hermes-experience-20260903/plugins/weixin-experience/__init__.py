@@ -125,6 +125,23 @@ def _find_pending_luckin_preview_for_chat(
     return None
 
 
+def _find_latest_luckin_preview_for_chat(
+    chat_id: str,
+    previews_dir: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    root = previews_dir or (Path.home() / ".luckin" / "pending_previews")
+    if not root.is_dir():
+        return None
+    for path in sorted(root.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if payload.get("target") == f"weixin:{chat_id}":
+                return payload
+        except (OSError, TypeError, ValueError):
+            continue
+    return None
+
+
 def _luckin_workflow_prompt(
     text: str,
     chat_id: str,
@@ -141,6 +158,20 @@ def _luckin_workflow_prompt(
                 "run confirm_luckin_order_fast.py once with target "
                 f"{target!r}. Relay only its replyText. Do not browse, look up the menu "
                 "again, or create the order by any other path."
+            )
+        latest = _find_latest_luckin_preview_for_chat(chat_id, previews_dir)
+        if (
+            latest is not None
+            and latest.get("status") == "prepared"
+            and latest.get("preset") == "grape-ice-tea-xl-no-sugar"
+        ):
+            return (
+                "This Weixin chat has an expired Luckin preview. Do not create an "
+                "order from it. Load only luckin-cli-ordering, then run "
+                "prepare_luckin_order_fast.py once with preset "
+                "grape-ice-tea-xl-no-sugar and target "
+                f"{target!r}. Relay only its fresh replyText and require the user to "
+                "confirm again. Do not browse or use the expired price/coupon."
             )
     if _LUCKIN_MARKER_RE.search(raw):
         return (

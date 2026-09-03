@@ -16,15 +16,17 @@
     "wrapper_version": "260330.1.2"
   },
   "luckin_skill": {
-    "version": "2.1.0",
+    "version": "2.1.1",
     "model_guided": true,
     "durable_preview_seconds": 900,
-    "atomic_confirmation": true
+    "atomic_confirmation": true,
+    "expired_preview_requires_refresh": true
   },
   "weixin_experience": {
-    "version": "1.1.0",
+    "version": "1.1.1",
     "single_message_delivery": true,
-    "luckin_prompt_routing": true
+    "luckin_prompt_routing": true,
+    "expired_confirmation_refresh": true
   },
   "ionbridge_skill": {
     "version": "3.0",
