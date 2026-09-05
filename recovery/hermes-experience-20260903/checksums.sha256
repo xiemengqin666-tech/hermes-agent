@@ -1,4 +1,4 @@
-a388bdd68b3be1b930ed05f41b174e9e756a0f521e3c96560df6f3b09eb17462  ./README.md
+211e70828b84dbbd68000ebc619bb404290a43c28d9228fa489954c98c641e17  ./README.md
 e174fb78c41a1f214d181db88cfe8da84d74935e4d88c2e6ff0b5461ae952cec  ./config/codex-capability-alignment.example.yaml
 116f92be1c3751e506ec8d3281a84fa7c0dcef362882c5e0fcbbef9c3ee4a55e  ./config/feishu.example.yaml
 08935663774dc30318abb8e86374fa188f5fd7a186b15f1dd3687d96a1440417  ./config/ionbridge.example.yaml
@@ -27,7 +27,7 @@ f2781e05c66fd9f9edb945a0b0c65bd83982e8316116505e6c36374f1307bb46  ./runtime-scri
 dabb4bc28a2f005907b83f7ad6f29f0e744f9aa57135749d72e280ec934e2451  ./scripts/configure_skills.py
 2ceb1aed6e5bb21dc81e2635cad8448f72e57f43737eb03c831ab97bbe1b08a2  ./scripts/normalize_cron_jobs.py
 8a942b23d4f51e4e91b1aa552fe84a7d243a91229a2f5b45ef0e37fba6b86f69  ./scripts/normalize_profile_settings.py
-88272ad9a661e599ba8e7d209891bafa502e221fbaa5b79324c1a8162910b246  ./scripts/normalize_workspace_rules.py
+7d52b573d3c069bc8e26c8d5d003bd9c23d38153cd96a3420504b5bb5ee85504  ./scripts/normalize_workspace_rules.py
 f87dcc102528ba07ab56f3eec84a88065a28e7e6120809b87c8fc18139f75a68  ./scripts/verify_browser_routing.py
 9992b8cba770533dca9b23cd35fe3b249febbea624536549a2dc3df4919461c7  ./skills/ionbridge-mcp/SKILL.md
 5eec3c0280302f798ca9d92ed1c803f92d375360b6d04796c74839cdd4538cc7  ./skills/luckin-cli-ordering/SKILL.md

@@ -20,8 +20,9 @@ tested Git baseline instead of relying on a cross-version autostash.
 - `plugins/openclaw-lark-stream/`: pinned Feishu stream wrapper and source.
 - `plugins/weixin-experience/`: Weixin single-message and durable Luckin flow.
 - `skills/luckin-cli-ordering/`: deterministic Luckin ordering workflow.
-- `scripts/normalize_workspace_rules.py`: removes legacy browser and manual
-  skill-ledger rules from connector workflows.
+- `scripts/normalize_workspace_rules.py`: restores the concise verified
+  `SOUL.md` and workspace rules, removing legacy OpenClaw startup chatter,
+  forced team delegation, proactive heartbeats, and unverified runtime claims.
 - `scripts/normalize_profile_settings.py`: keeps the default runtime on the
   verified model, reasoning, session-reset, approval, and Edge-only settings;
   it does not create or rewrite collaboration profiles.
