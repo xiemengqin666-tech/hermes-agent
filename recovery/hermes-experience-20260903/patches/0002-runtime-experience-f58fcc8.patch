@@ -1642,6 +1642,73 @@ index 14068d1cdd7f6597db325d1ab0c73a5c864b0f54..e32545ee916a712699b5431a079feb81
      # Exit code *before* the restart: under --gateway this process lives in the gateway's
      # systemd cgroup and the systemctl-restart fallback SIGKILLs it (KillMode=mixed), so
      # the marker would never land and the new gateway's watcher would time out spuriously.
+diff --git a/hermes_cli/update_cmd_fleet.py b/hermes_cli/update_cmd_fleet.py
+index e9f1c92875ddcabadc90c4c6ed710b02d8e534f6..e6c3b50061afeebda84381bc0b5edc9c277f8566 100644
+--- a/hermes_cli/update_cmd_fleet.py
++++ b/hermes_cli/update_cmd_fleet.py
+@@ -220,8 +220,8 @@ def _run_pending_fleet_restart() -> bool:
+     # user migrates.
+     try:
+         from hermes_cli.gateway import (
+-            find_gateway_pids, is_macos, is_windows, kill_gateway_processes, supports_systemd_services,
+-            _wait_for_gateway_exit,
++            find_gateway_pids, is_macos, is_windows, supports_systemd_services,
++            _wait_for_pid_exit,
+         )
+     except Exception as exc:
+         _warn_gateway_restart_phase_aborted(exc, None)
+@@ -233,6 +233,15 @@ def _run_pending_fleet_restart() -> bool:
+         logger.debug("Pending fleet restart: gateway probe failed: %s", exc)
+         pids = None
+ 
++    initial_pid_start_times: dict[int, float] = {}
++    if pids:
++        with suppress(Exception):
++            from gateway.status import get_process_start_time
++            for pid in pids:
++                started_at = get_process_start_time(pid)
++                if started_at is not None:
++                    initial_pid_start_times[pid] = started_at
++
+     if pids == []:
+         print("  ✓ No running gateways — nothing to restart.")
+         return True
+@@ -261,13 +270,30 @@ def _run_pending_fleet_restart() -> bool:
+                 logger.debug("Pending fleet restart: Windows failed: %s", exc)
+                 failed.append("windows-gateway")
+         try:
+-            leftover = list(find_gateway_pids(all_profiles=True))
++            running_after_restart = set(find_gateway_pids(all_profiles=True))
+         except Exception:
+-            leftover = list(pids or [])
++            running_after_restart = set(pids or [])
++        # Supervisor restarts replace the old process with a fresh PID. Only stop
++        # pre-update PIDs that survived; killing every PID here also kills the
++        # newly relaunched gateway and triggers launchd/systemd restart backoff.
++        leftover = sorted(set(pids or []).intersection(running_after_restart))
+         if leftover:
+-            with _best_effort('Pending fleet restart: PID stop failed: %s'):
+-                kill_gateway_processes(all_profiles=True)
+-                _wait_for_gateway_exit(timeout=5.0, force_after=None)
++            from gateway.status import terminate_pid
++            for pid in leftover:
++                with _best_effort('Pending fleet restart: PID stop failed: %s'):
++                    kwargs = {}
++                    if pid in initial_pid_start_times:
++                        kwargs["expected_start_time"] = initial_pid_start_times[pid]
++                    terminate_pid(pid, **kwargs)
++
++            deadline = _time.monotonic() + 5.0
++            survivors = []
++            for pid in leftover:
++                remaining = max(0.0, deadline - _time.monotonic())
++                if not _wait_for_pid_exit(pid, remaining):
++                    survivors.append(pid)
++            if survivors:
++                failed.extend(f"gateway-pid-{pid}" for pid in survivors)
+         if failed:
+             _warn_incomplete_gateway_fleet_restart(failed)
+             return False
 diff --git a/plugins/platforms/feishu/adapter.py b/plugins/platforms/feishu/adapter.py
 index 7614366cb7d7abf4e0e76512e2dc7a442362b0fc..39fcfdb8603a33606edcbcad9206cf26124c022c 100644
 --- a/plugins/platforms/feishu/adapter.py
@@ -3384,6 +3451,75 @@ index fe6ca2c8b43cc83c7f09a4a610c1760e4414d28b..f8c3c0761cb1ba77b8d2f66e640dca45
 -
 -
 -
+diff --git a/tests/hermes_cli/test_update_fleet_restart_pending.py b/tests/hermes_cli/test_update_fleet_restart_pending.py
+index 156573a92ee9ed9137ab495042740cfd691c177e..7140d9004481e0c31bf1cc23fa7da58a65f7879b 100644
+--- a/tests/hermes_cli/test_update_fleet_restart_pending.py
++++ b/tests/hermes_cli/test_update_fleet_restart_pending.py
+@@ -292,6 +292,64 @@ def test_run_pending_restart_true_when_no_gateways(monkeypatch, capsys):
+     assert "nothing to restart" in capsys.readouterr().out
+ 
+ 
++def test_pending_restart_does_not_stop_fresh_supervised_gateway(monkeypatch):
++    probes = iter([[101], [202]])
++    monkeypatch.setattr(
++        "hermes_cli.gateway.find_gateway_pids", lambda **k: next(probes)
++    )
++    monkeypatch.setattr("hermes_cli.gateway.supports_systemd_services", lambda: False)
++    monkeypatch.setattr("hermes_cli.gateway.is_macos", lambda: True)
++    monkeypatch.setattr("hermes_cli.gateway.is_windows", lambda: False)
++    monkeypatch.setattr(
++        update_cmd_fleet,
++        "_restart_macos_launchd_gateways",
++        lambda restarted, failed, drain_budget: restarted.append("ai.hermes.gateway"),
++    )
++    monkeypatch.setattr(hermes_main, "_purge_stale_hermes_modules", lambda: None)
++    monkeypatch.setattr(
++        "gateway.status.get_process_start_time", lambda pid: float(pid)
++    )
++
++    stopped = []
++    monkeypatch.setattr(
++        "gateway.status.terminate_pid", lambda pid, **kwargs: stopped.append(pid)
++    )
++
++    assert update_cmd._run_pending_fleet_restart() is True
++    assert stopped == []
++
++
++def test_pending_restart_stops_only_original_survivor(monkeypatch):
++    probes = iter([[101], [101, 202]])
++    monkeypatch.setattr(
++        "hermes_cli.gateway.find_gateway_pids", lambda **k: next(probes)
++    )
++    monkeypatch.setattr("hermes_cli.gateway.supports_systemd_services", lambda: False)
++    monkeypatch.setattr("hermes_cli.gateway.is_macos", lambda: True)
++    monkeypatch.setattr("hermes_cli.gateway.is_windows", lambda: False)
++    monkeypatch.setattr(
++        update_cmd_fleet,
++        "_restart_macos_launchd_gateways",
++        lambda restarted, failed, drain_budget: restarted.append("ai.hermes.gateway"),
++    )
++    monkeypatch.setattr(hermes_main, "_purge_stale_hermes_modules", lambda: None)
++    monkeypatch.setattr(
++        "gateway.status.get_process_start_time", lambda pid: float(pid)
++    )
++
++    stopped = []
++    monkeypatch.setattr(
++        "gateway.status.terminate_pid",
++        lambda pid, **kwargs: stopped.append((pid, kwargs)),
++    )
++    monkeypatch.setattr(
++        "hermes_cli.gateway._wait_for_pid_exit", lambda pid, timeout: True
++    )
++
++    assert update_cmd._run_pending_fleet_restart() is True
++    assert stopped == [(101, {"expected_start_time": 101.0})]
++
++
+ # ---------------------------------------------------------------------------
+ # cmd_update integration (mocked git / restart)
+ # ---------------------------------------------------------------------------
 diff --git a/tests/tools/test_delegate_sync_platform.py b/tests/tools/test_delegate_sync_platform.py
 new file mode 100644
 index 0000000000000000000000000000000000000000..5476e48863a8a1e73e9c6223f95ac24a69986656

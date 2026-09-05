@@ -6,7 +6,7 @@ HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 HERMES_REPO="${HERMES_REPO:-$HERMES_HOME/hermes-agent}"
 PATCHES=(
   "$ROOT/patches/0001-runtime-experience-f98f5e7.patch"
-  "$ROOT/patches/0002-runtime-experience-5ac75e9.patch"
+  "$ROOT/patches/0002-runtime-experience-f58fcc8.patch"
 )
 PLUGIN_SOURCE="$ROOT/plugins/openclaw-lark-stream"
 PLUGIN_DIR="$HERMES_HOME/plugins/openclaw-lark-stream"

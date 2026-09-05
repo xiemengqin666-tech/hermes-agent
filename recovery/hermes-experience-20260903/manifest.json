@@ -4,8 +4,8 @@
   "hermes": {
     "version": "0.21.0",
     "legacy_base_commit": "f98f5e74e00e54c36088fa2e78171e2a408ba7c9",
-    "current_base_commit": "5ac75e91e2012497db474835a58e0139e89047cd",
-    "latest_tested_base_commit": "5ac75e91e2012497db474835a58e0139e89047cd"
+    "current_base_commit": "f58fcc8118d9db092ad60d363d4a28520e08ac5a",
+    "latest_tested_base_commit": "f58fcc8118d9db092ad60d363d4a28520e08ac5a"
   },
   "runtime_patches": [
     {
@@ -15,10 +15,10 @@
       "file_count": 18
     },
     {
-      "path": "patches/0002-runtime-experience-5ac75e9.patch",
-      "base_commit": "5ac75e91e2012497db474835a58e0139e89047cd",
-      "sha256": "69bf02b73e1039d871b987dd39c75d50689836a53da196442c3e19a451ea7653",
-      "file_count": 28
+      "path": "patches/0002-runtime-experience-f58fcc8.patch",
+      "base_commit": "f58fcc8118d9db092ad60d363d4a28520e08ac5a",
+      "sha256": "99eda51b668bdfaf42f617c5809dbfa023efe613ffae590ba763b8fcabbefa6e",
+      "file_count": 30
     }
   ],
   "feishu_stream": {

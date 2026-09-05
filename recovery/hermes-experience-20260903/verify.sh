@@ -6,7 +6,7 @@ HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 HERMES_REPO="${HERMES_REPO:-$HERMES_HOME/hermes-agent}"
 PATCHES=(
   "$ROOT/patches/0001-runtime-experience-f98f5e7.patch"
-  "$ROOT/patches/0002-runtime-experience-5ac75e9.patch"
+  "$ROOT/patches/0002-runtime-experience-f58fcc8.patch"
 )
 PLUGIN_DIR="$HERMES_HOME/plugins/openclaw-lark-stream"
 WEIXIN_PLUGIN_DIR="$HERMES_HOME/plugins/weixin-experience"
@@ -140,6 +140,12 @@ if "$PYTHON" -c 'import pytest' >/dev/null 2>&1; then
   fi
   if [[ -f "$HERMES_HOME/plugins/weixin-experience/tests/test_luckin_qr_recovery.py" ]]; then
     TESTS+=("$HERMES_HOME/plugins/weixin-experience/tests/test_luckin_qr_recovery.py")
+  fi
+  if [[ -f "$HERMES_REPO/tests/hermes_cli/test_update_fleet_restart_pending.py" ]]; then
+    TESTS+=(
+      "$HERMES_REPO/tests/hermes_cli/test_update_fleet_restart_pending.py::test_pending_restart_does_not_stop_fresh_supervised_gateway"
+      "$HERMES_REPO/tests/hermes_cli/test_update_fleet_restart_pending.py::test_pending_restart_stops_only_original_survivor"
+    )
   fi
   PYTEST_ARGS=(-q)
   if grep -Fq 'test_concurrent_dedup_persists_land_in_order' \

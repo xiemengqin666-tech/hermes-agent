@@ -8,10 +8,11 @@ tested Git baseline instead of relying on a cross-version autostash.
 
 - `patches/0001-runtime-experience-f98f5e7.patch`: current-runtime overlay for
   Feishu, Weixin, `/update`, usage accounting, cron compatibility, and tests.
-- `patches/0002-runtime-experience-5ac75e9.patch`: current reduced overlay reconciled
+- `patches/0002-runtime-experience-f58fcc8.patch`: current reduced overlay reconciled
   and tested against the latest upstream commit available during this audit,
   including the unified Feishu stream, Weixin delivery, `/update`, Codex-style
-  one-shot workspace inheritance, and verification stop behavior.
+  one-shot workspace inheritance, verification stop behavior, and a targeted
+  pending-restart cleanup that cannot kill a freshly relaunched gateway.
 - `plugins/openclaw-lark-stream/`: pinned Feishu stream wrapper and source.
 - `plugins/weixin-experience/`: Weixin single-message and durable Luckin flow.
 - `skills/luckin-cli-ordering/`: deterministic Luckin ordering workflow.
@@ -38,8 +39,8 @@ tested Git baseline instead of relying on a cross-version autostash.
   `f98f5e74e00e54c36088fa2e78171e2a408ba7c9`; patch SHA-256
   `76d9ad46d4bb9d1fd54d04d67e2006e8cd3171b883fe2ffc654cc0d7d0cd08a8`.
 - Current and latest reconciled upstream: commit
-  `5ac75e91e2012497db474835a58e0139e89047cd`; patch SHA-256
-  `69bf02b73e1039d871b987dd39c75d50689836a53da196442c3e19a451ea7653`.
+  `f58fcc8118d9db092ad60d363d4a28520e08ac5a`; patch SHA-256
+  `99eda51b668bdfaf42f617c5809dbfa023efe613ffae590ba763b8fcabbefa6e`.
 - Companion CLIs: Codex `0.153.4`, Lark `1.0.93`, Claude Code `2.1.261`,
   agent-browser `0.36.0`, Agent WeChat `0.12.0`, OpenSpec `1.12.0`,
   openspec-playwright `0.3.86`, and OpenCLI `1.8.7`.
@@ -65,7 +66,7 @@ are never overwritten.
 Do not run `/update` from the old `f98f5e7` working tree and assume autostash
 will preserve the experience: the upstream Feishu adapter changed enough for
 stash restoration to conflict. Upgrade through a controlled baseline switch,
-then apply the matching `5ac75e9` overlay and run `verify.sh` before restarting
+then apply the matching `f58fcc8` overlay and run `verify.sh` before restarting
 the gateway.
 
 ## Preserved behavior
@@ -94,6 +95,9 @@ the gateway.
   updating the live Feishu stream plugin or downloading Chromium. The
   companion updater is bound before the source checkout so the same `/update`
   invocation can finish after Hermes replaces its working tree.
+- Interrupted-update catch-up restarts only terminate PIDs that existed before
+  the supervisor restart and are still alive afterward. Fresh launchd/systemd
+  gateway PIDs are preserved, preventing supervisor backoff and delayed recovery.
 - All agents use `gpt-6-astra`, reasoning `medium`, normal service tier, and Edge
   browser execution. Fast mode remains disabled, and automatic idle/daily
   session resets remain disabled for the default and collaboration profiles.
@@ -123,7 +127,7 @@ the gateway.
   public tests `12/12`, hidden tests `11/11`, exactly two allowed files
   changed, sentinel SHA-256 unchanged, and no post-pass ad-hoc or duplicate
   verification. The final messaging/update/coding regression set passed
-  `520/520` on upstream `5ac75e91`.
+  `522/522` on upstream `f58fcc81`.
 - Edge-only requires explicit `browser.backend: 'off'`, local provider, no
   CDP override, and `use_real_profile: false`, in addition to the Edge executable
   environment variables. Here `off` selects the built-in browser tools; it does
