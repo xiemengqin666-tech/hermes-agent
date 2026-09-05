@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Normalize secret-free Hermes profile settings preserved by this snapshot."""
+"""Normalize the default Hermes runtime without creating collaboration profiles."""
 
 from __future__ import annotations
 
@@ -94,7 +94,7 @@ def _set(data: CommentedMap, dotted: str, value: Any) -> None:
 
 
 def _config_paths(home: Path) -> list[Path]:
-    return [home / "config.yaml", *sorted((home / "profiles").glob("*/config.yaml"))]
+    return [home / "config.yaml"]
 
 
 def _conversation_routes(data: dict):
@@ -173,7 +173,7 @@ def main() -> int:
     errors = _collect_errors(args.home)
     if errors:
         raise SystemExit("Profile alignment failed:\n" + "\n".join(errors))
-    print(f"Profile alignment verified for {len(_config_paths(args.home))} configuration(s).")
+    print("Default Hermes runtime alignment verified; official future profiles were not modified.")
     return 0
 
 

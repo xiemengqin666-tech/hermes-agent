@@ -18,13 +18,20 @@ tested Git baseline instead of relying on a cross-version autostash.
 - `skills/luckin-cli-ordering/`: deterministic Luckin ordering workflow.
 - `scripts/normalize_workspace_rules.py`: removes legacy browser and manual
   skill-ledger rules from connector workflows.
-- `scripts/normalize_profile_settings.py`: keeps every profile on the verified
-  model, reasoning, session-reset, approval, and Edge-only settings.
-- `scripts/verify_browser_routing.py`: loads the real browser selectors in each
-  profile and checks the subprocess environment, not just the saved Edge path.
+- `scripts/normalize_profile_settings.py`: keeps the default runtime on the
+  verified model, reasoning, session-reset, approval, and Edge-only settings;
+  it does not create or rewrite collaboration profiles.
+- `scripts/configure_skills.py`: preserves skills bundled by the installed
+  Hermes version, exposes only official `lark-*` external skills, and permits
+  only Luckin and IonBridge as local custom skills. DJI remains an MCP server.
+- `scripts/verify_browser_routing.py`: loads the real browser selectors for the
+  default runtime and any existing official profile, then checks the subprocess
+  environment rather than trusting only the saved Edge path.
 - `scripts/normalize_cron_jobs.py`: verifies or restores cron delivery,
-  tool-budget, and single-card guardrails without storing chat IDs.
-- `skills/ai-news-workflow/`: corrected single-card AI-news workflow.
+  tool-budget, single-card guardrails, runtime script paths, and removal of all
+  custom-skill bindings without storing chat IDs.
+- `runtime-scripts/`: the nine secret-free scripts required by the preserved
+  usage, US-stock, and Horizon cron jobs.
 - `skills/ionbridge-mcp/`: secret-free AI 小电拼 Mirror control skill.
 - `config/suppressed-skills.txt`: skills intentionally removed and prevented
   from being re-seeded by Hermes updates.
@@ -51,6 +58,14 @@ tested Git baseline instead of relying on a cross-version autostash.
 
 ## Restore
 
+The verified fresh-install command used the official installer from
+`https://hermes-agent.nousresearch.com/install.sh` with
+`--skip-setup --skip-browser --skip-computer-use --non-interactive`. Its
+SHA-256 on 2026-09-05 was
+`5854b15670b51a8daae8f59ddfa917062de9f74be261eb73b4b8d719710f8968`.
+This avoids installing Hermes-managed Chromium before the recovery overlay is
+applied.
+
 Run from this directory:
 
 ```bash
@@ -62,6 +77,11 @@ The scripts auto-select a patch only when `git apply --check` proves an exact
 match. They never force a patch and do not copy overlays into
 `~/.hermes/update-patches`. Credentials, sessions, orders, chat IDs, and logs
 are never overwritten.
+
+The current official `f58fcc81` fresh install defines no collaboration
+profiles. Restore therefore removes only the four legacy local profiles
+`agencydev`, `agencyresearch`, `agencyreview`, and `agencysynth`; any differently
+named profile introduced by a future official Hermes release is left untouched.
 
 Do not run `/update` from the old `f98f5e7` working tree and assume autostash
 will preserve the experience: the upstream Feishu adapter changed enough for
@@ -98,16 +118,17 @@ the gateway.
 - Interrupted-update catch-up restarts only terminate PIDs that existed before
   the supervisor restart and are still alive afterward. Fresh launchd/systemd
   gateway PIDs are preserved, preventing supervisor backoff and delayed recovery.
-- All agents use `gpt-6-astra`, reasoning `medium`, normal service tier, and Edge
-  browser execution. Fast mode remains disabled, and automatic idle/daily
-  session resets remain disabled for the default and collaboration profiles.
+- The default runtime and saved channel/API routes use `gpt-6-astra`, reasoning
+  `medium`, normal service tier, and Edge browser execution. Fast mode remains
+  disabled, and automatic idle/daily session resets remain disabled. No local
+  collaboration profiles are recreated.
 - On 2026-09-05 the user selected Hermes' officially recommended balanced
   conversation setting. Main and delegation defaults are `medium`; Fast
   remains off. This uses the official Codex transport without an extra
   reasoning patch. No model or history reset is needed.
-- The subsequent GPT-6 migration covers all five profiles, pinned channel/API
-  routes, delegation, compression, planning/title auxiliaries, and pinned cron
-  models. The account's live Codex catalog reports 272,000 context tokens;
+- The GPT-6 migration covers the default runtime, pinned channel/API routes,
+  delegation, compression, planning/title auxiliaries, and pinned cron models.
+  The account's live Codex catalog reports 272,000 context tokens;
   do not substitute the public API's larger context window.
 - Coding uses native `coding_context: auto`, completion/parallel-call guidance,
   and `verify_on_stop: auto` with at most two nudges after unverified code edits
@@ -126,8 +147,9 @@ the gateway.
 - A clean GPT-6 blind coding rerun on 2026-09-05 completed on its first attempt:
   public tests `12/12`, hidden tests `11/11`, exactly two allowed files
   changed, sentinel SHA-256 unchanged, and no post-pass ad-hoc or duplicate
-  verification. The final messaging/update/coding regression set passed
-  `522/522` on upstream `f58fcc81`.
+  verification. After the fresh reinstall, the final messaging/update/coding
+  regression set passed `551` and deselected one known non-hermetic upstream
+  case on `f58fcc81`.
 - Edge-only requires explicit `browser.backend: 'off'`, local provider, no
   CDP override, and `use_real_profile: false`, in addition to the Edge executable
   environment variables. Here `off` selects the built-in browser tools; it does
@@ -138,13 +160,19 @@ the gateway.
   instruct agents to attach to Chrome or download bundled Chromium.
 - Ponytail and Superpowers-derived skills are removed. Hermes' native
   `.curator_suppressed` mechanism prevents them from returning after updates.
-- AI 小电拼 Mirror is available as `ionbridge` in the default agent and all
-  four Hermes profiles. Its device-specific URL is read from local config.
+- AI 小电拼 Mirror is available as the `ionbridge` custom skill and MCP server.
+  DJI is retained as the `dji-mini3` MCP server, without a duplicate custom
+  skill. Luckin is the only other custom skill. Device-specific URLs remain in
+  local configuration.
 - The content-assistant channel uses a 60% compression threshold; mechanical-arm
   and drone channels use 50%. These overrides are reapplied to both fresh and
   reused agents so very large turns compact before the final provider request.
-- Imported OpenClaw `lark-doc` is retained under the distinct
-  `openclaw-lark-doc` name, while the current official `lark-doc` stays active.
+- Twenty-eight official Lark CLI skills are loaded from their individual
+  `~/.agents/skills/lark-*` directories. Other global skills, including Draw.io,
+  are not exposed to Hermes. Imported OpenClaw Lark aliases are not restored.
+- The AI-news and China-video cron jobs are self-contained and have no custom
+  skill binding. Kuaishou references and deleted workspace-skill paths are not
+  restored.
 - Cron failures route to the developer assistant while successful output keeps
   each job's own destination. The video-trend job has a bounded tool/skill
   budget, and update checks use bounded logs and diffs.
@@ -153,3 +181,5 @@ the gateway.
 
 The snapshot excludes app secrets, OAuth tokens, Weixin credentials, session
 history, payment data, chat IDs, device-specific MCP URLs, and logs.
+Horizon credentials, collected data, and its locally modified checkout are not
+published here; they remain only in the local reinstall archive.

@@ -15,10 +15,9 @@ WEIXIN_PLUGIN_DIR="$HERMES_HOME/plugins/weixin-experience"
 SKILL_DIR="$HERMES_HOME/skills/productivity/luckin-cli-ordering"
 IONBRIDGE_SOURCE="$ROOT/skills/ionbridge-mcp"
 IONBRIDGE_DIR="$HERMES_HOME/skills/openclaw-imports/ionbridge-mcp"
-AI_NEWS_SOURCE="$ROOT/skills/ai-news-workflow"
-AI_NEWS_DIR="$HERMES_HOME/skills/openclaw-imports/ai-news-workflow"
-IMPORTED_LARK_DOC="$HERMES_HOME/skills/openclaw-imports/lark-doc"
-IMPORTED_LARK_DOC_ALIAS="$HERMES_HOME/skills/openclaw-imports/openclaw-lark-doc"
+RUNTIME_SCRIPTS_SOURCE="$ROOT/runtime-scripts"
+RUNTIME_SCRIPTS_DIR="$HERMES_HOME/scripts"
+LEGACY_COLLAB_PROFILES=(agencydev agencyresearch agencyreview agencysynth)
 SUPPRESSED="$ROOT/config/suppressed-skills.txt"
 
 fail() {
@@ -90,21 +89,19 @@ rsync -a --delete --exclude '__pycache__/' --exclude '*.pyc' \
   "$ROOT/skills/luckin-cli-ordering/" "$SKILL_DIR/"
 mkdir -p "$IONBRIDGE_DIR"
 rsync -a --delete "$IONBRIDGE_SOURCE/" "$IONBRIDGE_DIR/"
-mkdir -p "$AI_NEWS_DIR"
-rsync -a --delete "$AI_NEWS_SOURCE/" "$AI_NEWS_DIR/"
-for profile_root in "$HERMES_HOME"/profiles/*; do
-  [[ -d "$profile_root" ]] || continue
-  profile_ionbridge="$profile_root/skills/openclaw-imports/ionbridge-mcp"
-  mkdir -p "$profile_ionbridge"
-  rsync -a --delete "$IONBRIDGE_SOURCE/" "$profile_ionbridge/"
+mkdir -p "$RUNTIME_SCRIPTS_DIR"
+rsync -a "$RUNTIME_SCRIPTS_SOURCE/" "$RUNTIME_SCRIPTS_DIR/"
+
+for profile in "${LEGACY_COLLAB_PROFILES[@]}"; do
+  profile_root="$HERMES_HOME/profiles/$profile"
+  [[ ! -e "$profile_root" ]] || find "$profile_root" -depth -delete
 done
 
-if [[ -d "$IMPORTED_LARK_DOC" && ! -e "$IMPORTED_LARK_DOC_ALIAS" ]]; then
-  mv "$IMPORTED_LARK_DOC" "$IMPORTED_LARK_DOC_ALIAS"
-fi
-if [[ -f "$IMPORTED_LARK_DOC_ALIAS/SKILL.md" ]]; then
-  perl -0pi -e 's/^name:\s*lark-doc\s*$/name: openclaw-lark-doc/m' \
-    "$IMPORTED_LARK_DOC_ALIAS/SKILL.md"
+if [[ ! -f "$HOME/.agents/skills/lark-shared/SKILL.md" \
+   || ! -f "$HOME/.agents/skills/lark-doc/SKILL.md" \
+   || ! -f "$HOME/.agents/skills/lark-im/SKILL.md" ]]; then
+  command -v npx >/dev/null 2>&1 || fail "npx is required to install official Lark skills"
+  npx -y skills add larksuite/cli -g -y
 fi
 
 install_suppression() {
@@ -117,18 +114,18 @@ install_suppression() {
     | awk 'NF && !seen[$0]++' | sort > "$merged"
   mv "$merged" "$target"
   while IFS= read -r skill; do
-    rm -rf \
+    for path in \
       "$profile_root/skills/software-development/$skill" \
-      "$profile_root/skills/imported-agent-skills/$skill"
+      "$profile_root/skills/imported-agent-skills/$skill"; do
+      [[ ! -e "$path" ]] || find "$path" -depth -delete
+    done
   done < "$SUPPRESSED"
 }
 
 install_suppression "$HERMES_HOME"
-for profile_root in "$HERMES_HOME"/profiles/*; do
-  [[ -d "$profile_root" ]] && install_suppression "$profile_root"
-done
-rm -rf "$HERMES_HOME/plugins/ponytail"
-rm -f "$HERMES_HOME/workspace/ponytail_append.md"
+[[ ! -e "$HERMES_HOME/plugins/ponytail" ]] \
+  || find "$HERMES_HOME/plugins/ponytail" -depth -delete
+find "$HERMES_HOME/workspace" -maxdepth 1 -type f -name ponytail_append.md -delete 2>/dev/null || true
 if [[ -f "$HERMES_HOME/workspace/AGENTS.md" ]]; then
   python3 "$ROOT/scripts/normalize_workspace_rules.py" \
     "$HERMES_HOME/workspace/AGENTS.md" --souls-home "$HERMES_HOME"
@@ -137,12 +134,14 @@ fi
 PYTHON="$HERMES_REPO/venv/bin/python"
 [[ -x "$PYTHON" ]] || PYTHON="$(command -v python3)"
 "$PYTHON" "$ROOT/scripts/normalize_profile_settings.py" --home "$HERMES_HOME"
+"$PYTHON" "$ROOT/scripts/configure_skills.py" \
+  --home "$HERMES_HOME" --hermes-repo "$HERMES_REPO"
 if [[ -f "$HERMES_HOME/cron/jobs.json" ]]; then
   HERMES_HOME="$HERMES_HOME" PYTHONPATH="$HERMES_REPO" \
     "$PYTHON" "$ROOT/scripts/normalize_cron_jobs.py" \
     --hermes-repo "$HERMES_REPO"
 fi
 
-printf 'Restored messaging overlays, cron guardrails, skills, aliases, and workspace rules.\n'
+printf 'Restored messaging overlays, cron guardrails, selected skills, runtime scripts, and workspace rules.\n'
 HERMES_HOME="$HERMES_HOME" HERMES_REPO="$HERMES_REPO" "$ROOT/verify.sh"
 printf 'Restore verified. Gateway was not restarted.\n'

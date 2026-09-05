@@ -13,8 +13,8 @@ WEIXIN_PLUGIN_DIR="$HERMES_HOME/plugins/weixin-experience"
 SKILL_DIR="$HERMES_HOME/skills/productivity/luckin-cli-ordering"
 IONBRIDGE_TEMPLATE="$ROOT/skills/ionbridge-mcp/SKILL.md"
 IONBRIDGE_DIR="$HERMES_HOME/skills/openclaw-imports/ionbridge-mcp"
-AI_NEWS_DIR="$HERMES_HOME/skills/openclaw-imports/ai-news-workflow"
-IMPORTED_LARK_DOC_ALIAS="$HERMES_HOME/skills/openclaw-imports/openclaw-lark-doc"
+RUNTIME_SCRIPTS_DIR="$HERMES_HOME/scripts"
+LEGACY_COLLAB_PROFILES=(agencydev agencyresearch agencyreview agencysynth)
 SUPPRESSED="$ROOT/config/suppressed-skills.txt"
 PLUGIN_COMMIT="$(tr -d '\r\n' < "$ROOT/plugins/openclaw-lark-stream/UPSTREAM_COMMIT")"
 
@@ -45,14 +45,11 @@ done
 grep -Fq 'configured locally under `mcp_servers.ionbridge`' "$IONBRIDGE_TEMPLATE" \
   || fail "IonBridge recovery skill is not secret-free"
 [[ -f "$IONBRIDGE_DIR/SKILL.md" ]] || fail "IonBridge skill is missing"
-[[ -f "$AI_NEWS_DIR/SKILL.md" ]] || fail "AI news workflow skill is missing"
-grep -Fq '不得主动拆成多条消息' "$AI_NEWS_DIR/SKILL.md" \
-  || fail "AI news workflow lost its single-card delivery rule"
-if [[ -f "$IMPORTED_LARK_DOC_ALIAS/SKILL.md" ]]; then
-  grep -Fq 'name: openclaw-lark-doc' "$IMPORTED_LARK_DOC_ALIAS/SKILL.md" \
-    || fail "imported lark-doc alias is ambiguous"
-fi
 [[ ! -d "$HERMES_HOME/plugins/ponytail" ]] || fail "Ponytail plugin is still installed"
+for profile in "${LEGACY_COLLAB_PROFILES[@]}"; do
+  [[ ! -e "$HERMES_HOME/profiles/$profile" ]] \
+    || fail "legacy collaboration profile is still installed: $profile"
+done
 
 verify_suppression() {
   local profile_root="$1"
@@ -66,9 +63,6 @@ verify_suppression() {
 }
 
 verify_suppression "$HERMES_HOME"
-for profile_root in "$HERMES_HOME"/profiles/*; do
-  [[ -d "$profile_root" ]] && verify_suppression "$profile_root"
-done
 
 PYTHON="${HERMES_PYTHON:-$HERMES_REPO/venv/bin/python}"
 if [[ ! -x "$PYTHON" && -x "$HERMES_HOME/hermes-agent/venv/bin/python" ]]; then
@@ -80,16 +74,34 @@ fi
 "$PYTHON" "$ROOT/scripts/normalize_profile_settings.py" \
   --home "$HERMES_HOME" --check
 
+"$PYTHON" "$ROOT/scripts/configure_skills.py" --check \
+  --home "$HERMES_HOME" --hermes-repo "$HERMES_REPO"
+
 "$PYTHON" "$ROOT/scripts/verify_browser_routing.py" \
   --home "$HERMES_HOME" --hermes-repo "$HERMES_REPO"
 
 "$PYTHON" -m py_compile \
   "$PLUGIN_DIR/__init__.py" \
   "$WEIXIN_PLUGIN_DIR/__init__.py" \
+  "$RUNTIME_SCRIPTS_DIR/ai_news_rss.py" \
+  "$RUNTIME_SCRIPTS_DIR/codex_usage_query.py" \
+  "$RUNTIME_SCRIPTS_DIR/horizon_ai_news_collect.py" \
+  "$RUNTIME_SCRIPTS_DIR/horizon_ai_news_context.py" \
+  "$RUNTIME_SCRIPTS_DIR/horizon_ai_news_context_fast.py" \
+  "$RUNTIME_SCRIPTS_DIR/horizon_company_news_context.py" \
+  "$RUNTIME_SCRIPTS_DIR/us_stock_market_data.py" \
   "$SKILL_DIR/scripts/prepare_luckin_order_fast.py" \
   "$SKILL_DIR/scripts/confirm_luckin_order_fast.py" \
   "$SKILL_DIR/scripts/create_luckin_order_fast.py" \
   "$SKILL_DIR/scripts/watch_luckin_order.py"
+bash -n \
+  "$RUNTIME_SCRIPTS_DIR/horizon_ai_news_precompute.sh" \
+  "$RUNTIME_SCRIPTS_DIR/horizon_ai_news_precompute_detached.sh"
+for source in "$ROOT"/runtime-scripts/*; do
+  target="$RUNTIME_SCRIPTS_DIR/$(basename "$source")"
+  cmp -s "$source" "$target" \
+    || fail "runtime script differs from the recovery copy: $(basename "$source")"
+done
 
 if [[ -f "$HERMES_HOME/workspace/AGENTS.md" ]]; then
   "$PYTHON" "$ROOT/scripts/normalize_workspace_rules.py" --check \
@@ -158,7 +170,7 @@ if "$PYTHON" -c 'import pytest' >/dev/null 2>&1; then
     )
   fi
   TEST_HOME="$(mktemp -d)"
-  trap 'rm -rf "$TEST_HOME"' EXIT
+  trap 'find "$TEST_HOME" -depth -delete 2>/dev/null || true' EXIT
   (
     cd "$HERMES_REPO"
     HERMES_HOME="$TEST_HOME" PYTHONPATH="$HERMES_REPO" \

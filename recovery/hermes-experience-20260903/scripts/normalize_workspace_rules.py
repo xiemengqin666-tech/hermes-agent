@@ -80,8 +80,10 @@ def main() -> None:
     elif updated != original:
         args.path.write_text(updated, encoding="utf-8")
     if args.souls_home:
-        paths = [args.souls_home / "SOUL.md", *sorted((args.souls_home / "profiles").glob("*/SOUL.md"))]
+        paths = [args.souls_home / "SOUL.md"]
         for path in paths:
+            if not path.is_file():
+                continue
             original = path.read_text(encoding="utf-8")
             updated = normalize_soul(original)
             if args.check and updated != original:

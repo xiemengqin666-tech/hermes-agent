@@ -4,7 +4,9 @@
   "provider": "openai-codex",
   "reasoning_effort": "medium",
   "service_tier": "normal",
-  "profiles_verified": 5,
+  "legacy_profiles_verified_before_reinstall": 5,
+  "official_profiles_after_fresh_reinstall": 0,
+  "legacy_collaboration_profiles_removed": true,
   "pinned_conversation_routes_verified": 49,
   "gateway_conversations_retained": 80,
   "codex_live_catalog_context_tokens": 272000,
@@ -26,8 +28,8 @@
     "verification_note": "The canonical unittest suite produced full passing evidence. No temporary ad-hoc verification or duplicate post-pass test run occurred."
   },
   "regression_tests": {
-    "coding_and_reasoning_passed": 186,
-    "messaging_update_luckin_transport_passed": 324,
+    "fresh_reinstall_selected_suite_passed": 551,
+    "skipped": 0,
     "preexisting_environment_isolation_test_deselected": 1
   },
   "runtime_checks": {

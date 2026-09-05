@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Restore the local cron safety rules without embedding delivery IDs."""
+"""Detach preserved cron jobs from deleted custom skills and stale paths."""
 
 from __future__ import annotations
 
@@ -27,12 +27,10 @@ TOOLSETS = {
     "14d8a7a546c5": ["terminal"],
     "3b6de2deae77": [
         "web",
-        "browser",
         "terminal",
         "file",
         "code_execution",
         "vision",
-        "skills",
         "todo",
         "xiaohongshu",
     ],
@@ -45,10 +43,9 @@ PROMPT_GUARDS = {
         "发送状态或任务状态词。",
     ),
     "3b6de2deae77": (
-        "只允许加载 `china-hot-video-curation`",
+        "不要加载任何 skill 或 SKILL.md",
         "\n\n【恢复约束：上下文预算，优先级最高】\n"
-        "只允许加载 `china-hot-video-curation`，不得加载其他 skill；仅在具体 "
-        "fallback 命中时读取一份相关 reference。",
+        "不要加载任何 skill 或 SKILL.md；只按需读取一份必要资料，禁止预读无关文件。",
     ),
     DEV_JOB_ID: (
         "git log -n 20",
@@ -58,6 +55,55 @@ PROMPT_GUARDS = {
         "`git diff --shortstat HEAD..origin/main`；禁止输出完整提交、完整 diff 或完整文件列表。",
     ),
 }
+COMMON_REPLACEMENTS = (
+    (
+        "python3 ~/.hermes/workspace/skills/us-stock-analysis/fetch_data.py",
+        "python3 ~/.hermes/scripts/us_stock_market_data.py",
+    ),
+    (
+        "python3 ~/.hermes/workspace/skills/gpt-usage/query.py",
+        "python3 ~/.hermes/scripts/codex_usage_query.py",
+    ),
+    (
+        "只使用已注入的上下文、已预加载的 ai-news-workflow skill 和 terminal 工具；"
+        "除 ai-news-workflow 之外，不要加载、读取或调用其他 SKILL.md / skill 工具。",
+        "只使用已注入的上下文和 terminal 工具；不要加载、读取或调用任何 "
+        "SKILL.md / skill 工具。",
+    ),
+)
+CHINA_REPLACEMENTS = (
+    (
+        "完整热度门槛、聚类、去重、状态文件和输出格式遵循已附加的 "
+        "`china-hot-video-curation` skill；本 prompt 的“只收运镜”范围优先级更高。",
+        "完整热度门槛、聚类、去重、状态文件和输出格式均以本 prompt 为准。",
+    ),
+    (
+        "【上下文与工具预算】只允许加载 `china-hot-video-curation`，不要加载其他 "
+        "skill。先采集平台数据；只有命中特定 fallback 时才按需读取对应的一份 "
+        "reference，禁止预读全部参考文件或大段无关文件。",
+        "【上下文与工具预算】不要加载任何 skill 或 SKILL.md。先采集平台数据；"
+        "只有命中特定 fallback 时才按需读取一份必要资料，禁止预读无关文件。",
+    ),
+    ("每期分别检索抖音、小红书、B站，并补查微博、快手；", "每期分别检索抖音、小红书、B站，并补查微博；"),
+    ("   - 快手：`/Users/xiemengqin/.hermes/browser-states/kuaishou.json`\n", ""),
+    ("   - 只允许使用三个固定 session：", "   - 只允许使用两个固定 session："),
+    ("、`cron-trends-kuaishou`", ""),
+    ("6. 微博、快手先加载各自 state", "6. 微博先加载对应 state"),
+    ("对三个固定 session 执行 `close`", "对两个固定 session 执行 `close`"),
+    ("分别执行三个固定 session 的 `close`", "分别执行两个固定 session 的 `close`"),
+    ("抖音/小红书/B站/微博/快手状态", "抖音/小红书/B站/微博状态"),
+    (
+        "/Users/xiemengqin/.hermes/workspace/data/china-hot-video-motion-clusters-seen.json",
+        "/Users/xiemengqin/.hermes/cron/state/china-hot-video-motion-clusters-seen.json",
+    ),
+)
+FORBIDDEN_PROMPT_TEXT = (
+    "workspace/skills",
+    "ai-news-workflow",
+    "china-hot-video-curation",
+    "kuaishou",
+    "快手",
+)
 
 
 def _usable_target(value: Any) -> str | None:
@@ -67,6 +113,18 @@ def _usable_target(value: Any) -> str | None:
     if not value or value.lower() in {"local", "origin", "none"}:
         return None
     return value
+
+
+def _transform_prompt(job_id: str, prompt: str) -> str:
+    for old, new in COMMON_REPLACEMENTS:
+        prompt = prompt.replace(old, new)
+    if job_id == "3b6de2deae77":
+        for old, new in CHINA_REPLACEMENTS:
+            prompt = prompt.replace(old, new)
+    required, guard = PROMPT_GUARDS.get(job_id, (None, None))
+    if required and required not in prompt:
+        prompt = prompt.rstrip() + guard
+    return prompt
 
 
 def _desired_updates(jobs: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -82,23 +140,22 @@ def _desired_updates(jobs: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any
 
     updates: dict[str, dict[str, Any]] = {}
     for job_id in KNOWN_JOB_IDS:
-        if job_id in jobs:
-            updates[job_id] = {"failure_deliver": failure_target}
-            if jobs[job_id].get("model"):
-                updates[job_id].update(model="gpt-6-astra", provider="openai-codex")
+        job = jobs[job_id]
+        update: dict[str, Any] = {
+            "failure_deliver": failure_target,
+            "skill": None,
+            "skills": [],
+        }
+        if job.get("model"):
+            update.update(model="gpt-6-astra", provider="openai-codex")
+        prompt = _transform_prompt(job_id, str(job.get("prompt") or ""))
+        if prompt != job.get("prompt"):
+            update["prompt"] = prompt
+        if job_id in TOOLSETS:
+            update["enabled_toolsets"] = TOOLSETS[job_id]
+        updates[job_id] = update
 
-    if "88f721888bfa" in jobs:
-        updates["88f721888bfa"]["deliver"] = failure_target
-    for job_id, toolsets in TOOLSETS.items():
-        if job_id in jobs:
-            updates[job_id]["enabled_toolsets"] = toolsets
-    for job_id, (required, guard) in PROMPT_GUARDS.items():
-        job = jobs.get(job_id)
-        if not job:
-            continue
-        prompt = str(job.get("prompt") or "")
-        if required not in prompt:
-            updates[job_id]["prompt"] = prompt.rstrip() + guard
+    updates["88f721888bfa"]["deliver"] = failure_target
     return updates
 
 
@@ -132,6 +189,17 @@ def main() -> int:
 
     if args.check and drift:
         raise RuntimeError("cron guardrail drift: " + ", ".join(drift))
+
+    refreshed = {job["id"]: job for job in list_jobs(include_disabled=True)}
+    for job_id in KNOWN_JOB_IDS:
+        job = refreshed[job_id]
+        prompt = str(job.get("prompt") or "")
+        found = [text for text in FORBIDDEN_PROMPT_TEXT if text in prompt]
+        if found:
+            raise RuntimeError(f"{job_id}: deleted dependency remains: {found}")
+        if job.get("skill") or job.get("skills"):
+            raise RuntimeError(f"{job_id}: custom skill binding remains")
+
     print(
         "Cron guardrails verified."
         if not drift

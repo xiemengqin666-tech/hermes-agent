@@ -3,6 +3,16 @@
   "revalidated": "2026-09-05",
   "hermes": {
     "version": "0.21.0",
+    "install_method": "official_fresh_installer",
+    "installer_skipped_chromium": true,
+    "installer_url": "https://hermes-agent.nousresearch.com/install.sh",
+    "installer_sha256": "5854b15670b51a8daae8f59ddfa917062de9f74be261eb73b4b8d719710f8968",
+    "installer_flags": [
+      "--skip-setup",
+      "--skip-browser",
+      "--skip-computer-use",
+      "--non-interactive"
+    ],
     "legacy_base_commit": "f98f5e74e00e54c36088fa2e78171e2a408ba7c9",
     "current_base_commit": "f58fcc8118d9db092ad60d363d4a28520e08ac5a",
     "latest_tested_base_commit": "f58fcc8118d9db092ad60d363d4a28520e08ac5a"
@@ -47,6 +57,31 @@
     "mcp_server": "ionbridge",
     "device_url_included": false
   },
+  "selected_custom_capabilities": {
+    "skills": [
+      "luckin-cli-ordering",
+      "ionbridge-mcp"
+    ],
+    "mcp_only": [
+      "dji-mini3"
+    ],
+    "unexpected_custom_skills_allowed": false
+  },
+  "official_lark_skills": {
+    "source": "larksuite/cli",
+    "count_at_revalidation": 28,
+    "external_dirs_limited_to_lark_prefix": true
+  },
+  "collaboration_profiles": {
+    "official_profiles_found_at_revalidation": [],
+    "legacy_profiles_removed": [
+      "agencydev",
+      "agencyresearch",
+      "agencyreview",
+      "agencysynth"
+    ],
+    "future_unknown_profiles_preserved": true
+  },
   "companion_clis": {
     "codex": "0.153.4",
     "lark": "1.0.93",
@@ -76,18 +111,34 @@
   },
   "content_assistant": {
     "compression_threshold": 0.6,
-    "terminal_outcome_controls_done_reaction": true,
-    "imported_lark_doc_alias": "openclaw-lark-doc"
+    "terminal_outcome_controls_done_reaction": true
   },
   "cron": {
     "expected_jobs": 10,
     "active_jobs": 9,
     "intentionally_paused_jobs": ["14d8a7a546c5"],
     "failure_delivery_derived_locally": true,
-    "chat_ids_included": false
+    "chat_ids_included": false,
+    "custom_skill_bindings": 0,
+    "kuaishou_removed": true,
+    "runtime_scripts_included": [
+      "ai_news_rss.py",
+      "codex_usage_query.py",
+      "horizon_ai_news_collect.py",
+      "horizon_ai_news_context.py",
+      "horizon_ai_news_context_fast.py",
+      "horizon_ai_news_precompute.sh",
+      "horizon_ai_news_precompute_detached.sh",
+      "horizon_company_news_context.py",
+      "us_stock_market_data.py"
+    ]
   },
   "removed_skills": [
     "ponytail",
+    "ai-news-workflow",
+    "china-hot-video-curation",
+    "drawio",
+    "kuaishou",
     "plan",
     "requesting-code-review",
     "subagent-driven-development",
@@ -95,5 +146,13 @@
     "test-driven-development",
     "writing-plans"
   ],
+  "validation": {
+    "passed": 551,
+    "skipped": 0,
+    "deselected": 1,
+    "gateway_self_restart_verified": true,
+    "feishu_accounts_connected": "2/2",
+    "weixin_accounts_connected": "4/4"
+  },
   "secrets_included": false
 }

@@ -1,4 +1,5 @@
-# Merge these values into each Hermes profile. Keep credentials in .env.
+# Merge these values into the default Hermes configuration. Keep credentials in .env.
+# Do not create collaboration profiles unless the installed official Hermes release does so.
 model:
   default: gpt-6-astra
   provider: openai-codex
@@ -54,10 +55,17 @@ approvals:
   mode: 'off'
 
 browser:
-  # Hermes calls its CDP-compatible engine "chrome" even when Edge is pinned.
-  engine: chrome
+  # `off` selects Hermes' built-in browser tools and avoids Browser Use's Chrome harness.
+  backend: 'off'
+  cloud_provider: local
+  use_real_profile: false
+  cdp_url: ''
 
-# Required .env values for every profile:
+# Required values in ~/.hermes/.env:
 # HERMES_BROWSER_EDGE_ONLY=true
 # PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+# PUPPETEER_SKIP_DOWNLOAD=true
 # AGENT_BROWSER_EXECUTABLE_PATH=/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge
+# PUPPETEER_EXECUTABLE_PATH=/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge
+# CHROME_PATH=/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge
+# BROWSER=open -a Microsoft Edge
