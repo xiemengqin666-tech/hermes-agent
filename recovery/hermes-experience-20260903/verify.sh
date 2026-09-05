@@ -104,10 +104,8 @@ for source in "$ROOT"/runtime-scripts/*; do
     || fail "runtime script differs from the recovery copy: $(basename "$source")"
 done
 
-if [[ -f "$HERMES_HOME/workspace/AGENTS.md" ]]; then
-  "$PYTHON" "$ROOT/scripts/normalize_workspace_rules.py" --check \
-    "$HERMES_HOME/workspace/AGENTS.md" --souls-home "$HERMES_HOME"
-fi
+"$PYTHON" "$ROOT/scripts/normalize_workspace_rules.py" --check \
+  "$HERMES_HOME/workspace/AGENTS.md" --souls-home "$HERMES_HOME"
 
 if [[ -f "$HERMES_HOME/cron/jobs.json" ]]; then
   HERMES_HOME="$HERMES_HOME" PYTHONPATH="$HERMES_REPO" \

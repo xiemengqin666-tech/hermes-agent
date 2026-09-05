@@ -112,7 +112,8 @@
     "oneshot_inherits_launch_cwd": true,
     "canonical_unittest_detection": true,
     "stop_after_fresh_verification": true,
-    "workflow_rules_in_soul": true,
+    "workflow_rules_in_soul": false,
+    "workflow_rules_in_workspace_agents": true,
     "codex_catalog_context_tokens": 272000
   },
   "content_assistant": {
@@ -160,6 +161,17 @@
     "launchd_gateway_child_classification_verified": true,
     "feishu_accounts_connected": "2/2",
     "weixin_accounts_connected": "4/4"
+  },
+  "prompt_rules": {
+    "updated": "2026-09-05",
+    "templates": "rules",
+    "public_files": 5,
+    "private_memory_included": false,
+    "on_demand_runbooks": true,
+    "restore_tests_passed": 7,
+    "runtime_prompt_loading_verified": true,
+    "runtime_patch_set_changed": false,
+    "full_e2e_revalidated_for_prompt_cleanup": false
   },
   "secrets_included": false
 }

@@ -1,8 +1,12 @@
 # Hermes experience recovery snapshot
 
-This secret-free snapshot preserves the verified Hermes messaging and cron
-experience used on this machine and revalidated on 2026-09-05. Runtime patches are tied to a
-tested Git baseline instead of relying on a cross-version autostash.
+This secret-free snapshot preserves the Hermes messaging and cron recovery
+baseline tested on 2026-09-05. Runtime patches are tied to their named Git
+baselines; this archive is not a claim to mirror the latest live checkout.
+
+The 2026-09-05 prompt cleanup is independently restorable from `rules/`.
+It separates identity, working instructions, and on-demand runbooks without
+adding runtime patches or changing model settings. See [rule maintenance](rules/RULES.md).
 
 ## Contents
 
@@ -20,9 +24,12 @@ tested Git baseline instead of relying on a cross-version autostash.
 - `plugins/openclaw-lark-stream/`: pinned Feishu stream wrapper and source.
 - `plugins/weixin-experience/`: Weixin single-message and durable Luckin flow.
 - `skills/luckin-cli-ordering/`: deterministic Luckin ordering workflow.
-- `scripts/normalize_workspace_rules.py`: restores the concise verified
-  `SOUL.md` and workspace rules, removing legacy OpenClaw startup chatter,
-  forced team delegation, proactive heartbeats, and unverified runtime claims.
+- `rules/`: single-source Markdown identity, workspace instructions, messaging
+  acceptance criteria, update guardrails, and maintenance notes.
+- `scripts/normalize_workspace_rules.py`: explicitly restores these five public
+  files, backing up existing differences. `--check` is read-only and catches
+  missing files. Private user preferences, memories and sessions are untouched.
+- `scripts/tests/test_workspace_rules.py`: isolated restore/check regression tests.
 - `scripts/normalize_profile_settings.py`: keeps the default runtime on the
   verified model, reasoning, session-reset, approval, and Edge-only settings;
   it does not create or rewrite collaboration profiles.
@@ -53,7 +60,7 @@ tested Git baseline instead of relying on a cross-version autostash.
 - Previous reconciled upstream: commit
   `f58fcc8118d9db092ad60d363d4a28520e08ac5a`; patch SHA-256
   `99eda51b668bdfaf42f617c5809dbfa023efe613ffae590ba763b8fcabbefa6e`.
-- Current and latest reconciled upstream: commit
+- Latest runtime baseline included in this archive: commit
   `d20a8e44755a8e999a2e816ef9f458c438d3e17c`; patch SHA-256
   `5bfac5184a74d53dd0fe2f9d7968d9845592d96cd9e86df48d32976d954a5581`.
 - Companion CLIs: Codex `0.153.4`, Lark `1.0.93`, Claude Code `2.1.261`,
@@ -91,11 +98,24 @@ profiles. Restore therefore removes only the four legacy local profiles
 `agencydev`, `agencyresearch`, `agencyreview`, and `agencysynth`; any differently
 named profile introduced by a future official Hermes release is left untouched.
 
-Do not run `/update` from the old `f98f5e7` working tree and assume autostash
-will preserve the experience: the upstream Feishu adapter changed enough for
-stash restoration to conflict. Upgrade through a controlled baseline switch,
-then apply the matching `d20a8e4` overlay and run `verify.sh` before restarting
-the gateway.
+Do not assume cross-version autostash preserves the experience: older Feishu
+adapter changes caused restore conflicts. On the live installation, local
+changes are committed on `local/hermes-experience`; use the installed updater
+and inspect conflicts, rather than reapplying an archived patch unconditionally.
+The runtime restore above is only for compatible archived baselines. For
+rule-only restoration, run:
+
+```bash
+python3 scripts/normalize_workspace_rules.py \
+  "$HOME/.hermes/workspace/AGENTS.md" --souls-home "$HOME/.hermes"
+python3 scripts/normalize_workspace_rules.py --check \
+  "$HOME/.hermes/workspace/AGENTS.md" --souls-home "$HOME/.hermes"
+```
+
+This is not an automatic startup or `/update` rewrite. Review and merge newer
+user rules before explicitly restoring the snapshot. No gateway restart is
+needed for file restoration; existing sessions can retain cached prompts until
+`/new`. Do not erase conversation history or bulk reset sessions to apply rules.
 
 ## Preserved behavior
 
@@ -119,7 +139,7 @@ the gateway.
   preview calls; order creation is never blindly retried.
 - Legacy workspace rules no longer force browser/image searches or a manual
   skill-usage terminal call during Luckin ordering.
-- `/update` uses official autostash and also checks companion CLIs without
+- The archived `/update` overlay used official autostash and also checked companion CLIs without
   updating the live Feishu stream plugin or downloading Chromium. The
   companion updater is bound before the source checkout so the same `/update`
   invocation can finish after Hermes replaces its working tree.
@@ -146,7 +166,7 @@ the gateway.
   and `verify_on_stop: auto` with at most two nudges after unverified code edits
   on interactive coding surfaces. Messaging avoids synthetic re-verification
   turns; its coding workflow still requires actual checks before completion.
-  Scoped SOUL rules cover coding requests in messaging channels too. Ordinary
+  Shared workspace rules cover coding requests in messaging channels too. Ordinary
   chat and Luckin ordering keep their own workflows. Read the target repo,
   use explicit workspace paths, apply small patches, preserve user edits, and
   run focused checks before reporting completion. Do not force delegation for
@@ -188,6 +208,26 @@ the gateway.
 - Cron failures route to the developer assistant while successful output keeps
   each job's own destination. The video-trend job has a bounded tool/skill
   budget, and update checks use bounded logs and diffs.
+
+## Prompt cleanup validation
+
+- Seven isolated restore tests passed: fresh install, idempotence, read-only
+  mismatch checks, missing-file detection, backups, private-state preservation,
+  and missing-template failure before writes (some cases are combined).
+- Actual Hermes loaders read the complete SOUL and workspace rules; detailed
+  runbooks are not injected into every prompt. Only `agent.coding_instructions`
+  changed in live configuration, reduced from 856 to 217 characters and now
+  pointing to the shared rules. Model, reasoning and service tier were unchanged.
+- Cleared MEMORY.md remains empty. USER.md was reorganized locally and is not
+  part of the public snapshot. API health passed; no gateway restart was done.
+- A fresh read-only Hermes CLI probe asked for current reasoning and Fast state
+  without supplying the answer. It made four terminal checks and answered
+  `medium`, normal configured tier, while explicitly leaving the actual
+  per-request tier unverified. This was one targeted behavior probe, not a speed
+  or general coding-quality benchmark.
+- These checks do not constitute a new full messaging, real-order, `/update`,
+  or Codex-vs-Hermes quality benchmark. Earlier runtime test counts below the
+  baseline description remain historical results, not results of prompt editing.
 
 ## Security
 

@@ -26,18 +26,10 @@ EXPECTED: dict[str, Any] = {
     "agent.max_verify_nudges": 2,
     "agent.verify_guidance": False,
     "agent.coding_instructions": (
-        "For coding tasks, read the repository instructions and git status first. "
-        "Use explicit absolute paths and terminal cwd for the target repository; "
-        "do not assume the CLI directory changes the configured terminal cwd. "
-        "Use CodeGraph for indexed symbol/call-flow questions and rg for literal text. "
-        "Implement narrow changes with patch tools, preserve unrelated user edits, "
-        "and run focused tests before reporting completion. For UI changes, inspect "
-        "the rendered result using Microsoft Edge only. Delegate only independent "
-        "work and wait for required results; do not delegate simple fixes. Report "
-        "actual changes, verification results and blockers concisely, without "
-        "pasting code unless requested. After verification follow-ups, summarize "
-        "the original task's changes as well as the checks. Never restart services or publish changes "
-        "unless required by the user's task."
+        "For coding work, read HERMES_HOME/workspace/AGENTS.md "
+        "(default ~/.hermes/workspace/AGENTS.md) if not already loaded, "
+        "along with the target repository's scoped instructions. "
+        "Use the actual tool cwd for that repository."
     ),
     "compression.enabled": True,
     "compression.threshold": 0.75,

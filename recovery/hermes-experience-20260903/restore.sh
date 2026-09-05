@@ -127,10 +127,8 @@ install_suppression "$HERMES_HOME"
 [[ ! -e "$HERMES_HOME/plugins/ponytail" ]] \
   || find "$HERMES_HOME/plugins/ponytail" -depth -delete
 find "$HERMES_HOME/workspace" -maxdepth 1 -type f -name ponytail_append.md -delete 2>/dev/null || true
-if [[ -f "$HERMES_HOME/workspace/AGENTS.md" ]]; then
-  python3 "$ROOT/scripts/normalize_workspace_rules.py" \
-    "$HERMES_HOME/workspace/AGENTS.md" --souls-home "$HERMES_HOME"
-fi
+python3 "$ROOT/scripts/normalize_workspace_rules.py" \
+  "$HERMES_HOME/workspace/AGENTS.md" --souls-home "$HERMES_HOME"
 
 PYTHON="$HERMES_REPO/venv/bin/python"
 [[ -x "$PYTHON" ]] || PYTHON="$(command -v python3)"
