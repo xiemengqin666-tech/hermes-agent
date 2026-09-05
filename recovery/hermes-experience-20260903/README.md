@@ -13,6 +13,10 @@ tested Git baseline instead of relying on a cross-version autostash.
   including the unified Feishu stream, Weixin delivery, `/update`, Codex-style
   one-shot workspace inheritance, verification stop behavior, and a targeted
   pending-restart cleanup that cannot kill a freshly relaunched gateway.
+- `patches/0003-runtime-experience-d20a8e4.patch`: latest complete overlay for
+  `d20a8e4`, including launchd wrapper-child ownership detection so `/update`
+  protects and reconciles the real gateway process instead of treating it as a
+  manual process.
 - `plugins/openclaw-lark-stream/`: pinned Feishu stream wrapper and source.
 - `plugins/weixin-experience/`: Weixin single-message and durable Luckin flow.
 - `skills/luckin-cli-ordering/`: deterministic Luckin ordering workflow.
@@ -45,9 +49,12 @@ tested Git baseline instead of relying on a cross-version autostash.
 - Legacy rollback baseline: `v0.21.0` / commit
   `f98f5e74e00e54c36088fa2e78171e2a408ba7c9`; patch SHA-256
   `76d9ad46d4bb9d1fd54d04d67e2006e8cd3171b883fe2ffc654cc0d7d0cd08a8`.
-- Current and latest reconciled upstream: commit
+- Previous reconciled upstream: commit
   `f58fcc8118d9db092ad60d363d4a28520e08ac5a`; patch SHA-256
   `99eda51b668bdfaf42f617c5809dbfa023efe613ffae590ba763b8fcabbefa6e`.
+- Current and latest reconciled upstream: commit
+  `d20a8e44755a8e999a2e816ef9f458c438d3e17c`; patch SHA-256
+  `5bfac5184a74d53dd0fe2f9d7968d9845592d96cd9e86df48d32976d954a5581`.
 - Companion CLIs: Codex `0.153.4`, Lark `1.0.93`, Claude Code `2.1.261`,
   agent-browser `0.36.0`, Agent WeChat `0.12.0`, OpenSpec `1.12.0`,
   openspec-playwright `0.3.86`, and OpenCLI `1.8.7`.
@@ -78,7 +85,7 @@ match. They never force a patch and do not copy overlays into
 `~/.hermes/update-patches`. Credentials, sessions, orders, chat IDs, and logs
 are never overwritten.
 
-The current official `f58fcc81` fresh install defines no collaboration
+The current official `d20a8e44` fresh install defines no collaboration
 profiles. Restore therefore removes only the four legacy local profiles
 `agencydev`, `agencyresearch`, `agencyreview`, and `agencysynth`; any differently
 named profile introduced by a future official Hermes release is left untouched.
@@ -86,7 +93,7 @@ named profile introduced by a future official Hermes release is left untouched.
 Do not run `/update` from the old `f98f5e7` working tree and assume autostash
 will preserve the experience: the upstream Feishu adapter changed enough for
 stash restoration to conflict. Upgrade through a controlled baseline switch,
-then apply the matching `f58fcc8` overlay and run `verify.sh` before restarting
+then apply the matching `d20a8e4` overlay and run `verify.sh` before restarting
 the gateway.
 
 ## Preserved behavior
@@ -118,6 +125,10 @@ the gateway.
 - Interrupted-update catch-up restarts only terminate PIDs that existed before
   the supervisor restart and are still alive afterward. Fresh launchd/systemd
   gateway PIDs are preserved, preventing supervisor backoff and delayed recovery.
+- On macOS, `/update` now follows a launchd wrapper to the actual gateway child,
+  excludes both from the manual-process sweep, and resolves the child's generic
+  `external` socket identity back to `launchd`. This prevents false partial
+  receipts, stale restart markers, and accidental termination of the new gateway.
 - The default runtime and saved channel/API routes use `gpt-6-astra`, reasoning
   `medium`, normal service tier, and Edge browser execution. Fast mode remains
   disabled, and automatic idle/daily session resets remain disabled. No local
@@ -148,8 +159,8 @@ the gateway.
   public tests `12/12`, hidden tests `11/11`, exactly two allowed files
   changed, sentinel SHA-256 unchanged, and no post-pass ad-hoc or duplicate
   verification. After the fresh reinstall, the final messaging/update/coding
-  regression set passed `551` and deselected one known non-hermetic upstream
-  case on `f58fcc81`.
+  regression set passed `590`, skipped two platform-specific cases, and
+  deselected one known non-hermetic upstream Feishu case on `d20a8e44`.
 - Edge-only requires explicit `browser.backend: 'off'`, local provider, no
   CDP override, and `use_real_profile: false`, in addition to the Edge executable
   environment variables. Here `off` selects the built-in browser tools; it does

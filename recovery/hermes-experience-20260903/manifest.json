@@ -14,8 +14,8 @@
       "--non-interactive"
     ],
     "legacy_base_commit": "f98f5e74e00e54c36088fa2e78171e2a408ba7c9",
-    "current_base_commit": "f58fcc8118d9db092ad60d363d4a28520e08ac5a",
-    "latest_tested_base_commit": "f58fcc8118d9db092ad60d363d4a28520e08ac5a"
+    "current_base_commit": "d20a8e44755a8e999a2e816ef9f458c438d3e17c",
+    "latest_tested_base_commit": "d20a8e44755a8e999a2e816ef9f458c438d3e17c"
   },
   "runtime_patches": [
     {
@@ -29,6 +29,12 @@
       "base_commit": "f58fcc8118d9db092ad60d363d4a28520e08ac5a",
       "sha256": "99eda51b668bdfaf42f617c5809dbfa023efe613ffae590ba763b8fcabbefa6e",
       "file_count": 30
+    },
+    {
+      "path": "patches/0003-runtime-experience-d20a8e4.patch",
+      "base_commit": "d20a8e44755a8e999a2e816ef9f458c438d3e17c",
+      "sha256": "5bfac5184a74d53dd0fe2f9d7968d9845592d96cd9e86df48d32976d954a5581",
+      "file_count": 34
     }
   ],
   "feishu_stream": {
@@ -147,10 +153,11 @@
     "writing-plans"
   ],
   "validation": {
-    "passed": 551,
-    "skipped": 0,
+    "passed": 590,
+    "skipped": 2,
     "deselected": 1,
     "gateway_self_restart_verified": true,
+    "launchd_gateway_child_classification_verified": true,
     "feishu_accounts_connected": "2/2",
     "weixin_accounts_connected": "4/4"
   },

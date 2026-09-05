@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 HERMES_REPO="${HERMES_REPO:-$HERMES_HOME/hermes-agent}"
 PATCHES=(
+  "$ROOT/patches/0003-runtime-experience-d20a8e4.patch"
   "$ROOT/patches/0001-runtime-experience-f98f5e7.patch"
   "$ROOT/patches/0002-runtime-experience-f58fcc8.patch"
 )
@@ -136,7 +137,10 @@ if "$PYTHON" -c 'import pytest' >/dev/null 2>&1; then
     "$HERMES_REPO/tests/gateway/test_queued_native_image_session_key.py"
     "$HERMES_REPO/tests/cron/test_cron_failure_deliver.py"
     "$HERMES_REPO/tests/hermes_cli/test_companion_cli_updates.py"
+    "$HERMES_REPO/tests/hermes_cli/test_gateway_proc_fallback.py"
+    "$HERMES_REPO/tests/hermes_cli/test_restart_plan_reconciliation.py"
     "$HERMES_REPO/tests/hermes_cli/test_tui_resume_flow.py"
+    "$HERMES_REPO/tests/hermes_cli/test_update_inventory.py"
     "$HERMES_REPO/tests/tools/test_delegate_sync_platform.py"
     "$SKILL_DIR/tests/test_delivery_manifest.py"
   )

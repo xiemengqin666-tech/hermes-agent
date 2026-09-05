@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 HERMES_REPO="${HERMES_REPO:-$HERMES_HOME/hermes-agent}"
 PATCHES=(
+  "$ROOT/patches/0003-runtime-experience-d20a8e4.patch"
   "$ROOT/patches/0001-runtime-experience-f98f5e7.patch"
   "$ROOT/patches/0002-runtime-experience-f58fcc8.patch"
 )

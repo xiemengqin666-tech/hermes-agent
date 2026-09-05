@@ -28,12 +28,15 @@
     "verification_note": "The canonical unittest suite produced full passing evidence. No temporary ad-hoc verification or duplicate post-pass test run occurred."
   },
   "regression_tests": {
-    "fresh_reinstall_selected_suite_passed": 551,
-    "skipped": 0,
+    "tested_base_commit": "d20a8e44755a8e999a2e816ef9f458c438d3e17c",
+    "fresh_reinstall_selected_suite_passed": 590,
+    "skipped": 2,
     "preexisting_environment_isolation_test_deselected": 1
   },
   "runtime_checks": {
     "official_gateway_restart_succeeded": true,
+    "launchd_gateway_child_classification_verified": true,
+    "fleet_restart_pending_marker_cleared": true,
     "installed_hermes_gateway_status_matches_service": true,
     "feishu_accounts_connected": "2/2",
     "weixin_accounts_connected": "4/4",

@@ -1,0 +1,3787 @@
+diff --git a/agent/account_usage.py b/agent/account_usage.py
+index 564b745..92d04e5 100644
+--- a/agent/account_usage.py
++++ b/agent/account_usage.py
+@@ -371,11 +371,17 @@ def _fetch_codex_account_usage(
+ ) -> Optional[AccountUsageSnapshot]:
+     token, resolved_base_url, account_id = _resolve_codex_usage_credentials(base_url, api_key)
+     payload = _get_json(_codex_backend_urls(resolved_base_url)[0], _codex_headers(token, account_id), timeout=15.0)
+-    windows = _usage_windows(payload.get("rate_limit") or {}, (("primary_window", "Session"), ("secondary_window", "Weekly")),
+-                             "used_percent", "reset_at")
++    rate_limit = payload.get("rate_limit") or {}
++    labels: list[tuple[str, str]] = []
++    for key, fallback in (("primary_window", "Session"), ("secondary_window", "Weekly")):
++        window = rate_limit.get(key) or {}
++        duration = window.get("limit_window_seconds")
++        labels.append((key, "Weekly" if duration == 7 * 24 * 60 * 60 else fallback))
++    windows = _usage_windows(rate_limit, tuple(labels), "used_percent", "reset_at")
+     details: list[str] = []
+-    count = _codex_banked_resets(payload)
+-    if count > 0:
++    banked = (payload.get("rate_limit_reset_credits") or {}).get("available_count")
++    if _is_num(banked):
++        count = int(banked)
+         details.append(f"You have {count} reset{_plural(count)} banked - use /usage reset to activate")
+     credits, balance = payload.get("credits") or {}, (payload.get("credits") or {}).get("balance")
+     if credits.get("has_credits") and _is_num(balance):
+diff --git a/agent/coding_context.py b/agent/coding_context.py
+index 5a6b3be..2e543a4 100644
+--- a/agent/coding_context.py
++++ b/agent/coding_context.py
+@@ -111,6 +111,10 @@ CODING_AGENT_GUIDANCE = (
+     "Verify, and know when to stop:\n"
+     "- Use `terminal` for git, builds, tests, and inspection. Run the relevant "
+     "tests/linter/build and confirm they pass before claiming the work is done.\n"
++    "- Run verification commands on their own, or connect later checks with "
++    "`&&`, so a later command cannot hide a failed test exit status. Once fresh "
++    "relevant checks pass, stop unless new edits, failures, or unresolved risks "
++    "justify more verification.\n"
+     "- Terminal state persists across calls: current directory and exported "
+     "environment variables carry forward. Activate a virtualenv or export setup "
+     "vars once, then reuse that state instead of re-sourcing it before every "
+@@ -449,6 +453,27 @@ def _read_small(path: Path) -> str:
+         return ""
+ 
+ 
++def _has_unittest_suite(root: Path) -> bool:
++    """Detect a plain stdlib unittest suite without walking a large tree."""
++    tests_dir = root / "tests"
++    if not tests_dir.is_dir():
++        return False
++    checked = 0
++    try:
++        for path in tests_dir.rglob("test*.py"):
++            if any(part in _CODE_SCAN_SKIP_DIRS for part in path.parts):
++                continue
++            checked += 1
++            source = _read_small(path)
++            if re.search(r"(?:^|\n)\s*(?:import\s+unittest|from\s+unittest\s+import\s+)", source):
++                return True
++            if checked >= 64:
++                break
++    except OSError:
++        return False
++    return False
++
++
+ @dataclass(frozen=True)
+ class ProjectFacts:
+     """Structured project facts — exposed so non-prompt consumers (desktop verify UI) don't re-detect."""
+@@ -473,6 +498,8 @@ def detect_project_facts(root: Path) -> ProjectFacts:
+         verify.extend(f"{js_pm} run {name}" for name in _VERIFY_TARGETS if name in scripts)
+     if (root / "pytest.ini").is_file() or "[tool.pytest" in _read_small(root / "pyproject.toml"):
+         verify.append("pytest")
++    elif _has_unittest_suite(root):
++        verify.append("python -m unittest discover -s tests")
+     makefile = _read_small(root / "Makefile")
+     verify.extend(
+         f"make {name}" for name in _VERIFY_TARGETS
+diff --git a/agent/runtime_cwd.py b/agent/runtime_cwd.py
+index b70f084..12aec14 100644
+--- a/agent/runtime_cwd.py
++++ b/agent/runtime_cwd.py
+@@ -40,6 +40,11 @@ def set_session_cwd(cwd: str | None) -> Token:
+     return _SESSION_CWD.set((cwd or "").strip())
+ 
+ 
++def reset_session_cwd(token: Token) -> None:
++    """Restore the logical cwd that preceded :func:`set_session_cwd`."""
++    _SESSION_CWD.reset(token)
++
++
+ def clear_session_cwd() -> None:
+     _SESSION_CWD.set("")
+ 
+diff --git a/agent/verification_evidence.py b/agent/verification_evidence.py
+index 468deb2..0a6a4e1 100644
+--- a/agent/verification_evidence.py
++++ b/agent/verification_evidence.py
+@@ -267,6 +267,9 @@ def _equivalent_needles(needle: list[str]) -> list[list[str]]:
+         candidates += [["bash", needle[0]], ["sh", needle[0]]]
+     if needle == ["pytest"]:
+         candidates += _PYTEST_SPELLINGS
++    if len(needle) >= 3 and needle[0] in {"python", "python3"} and needle[1] == "-m":
++        alternate = "python3" if needle[0] == "python" else "python"
++        candidates.append([alternate, *needle[1:]])
+     return candidates
+ 
+ 
+diff --git a/gateway/platforms/base.py b/gateway/platforms/base.py
+index 6e40a97..52ae242 100644
+--- a/gateway/platforms/base.py
++++ b/gateway/platforms/base.py
+@@ -2085,6 +2085,12 @@ class BasePlatformAdapter(ABC):
+     def _write_runtime_status_safe(self, context: str, **kwargs) -> None:
+         """Write runtime status; log first failure per context at warning, rest at debug
+         (failures — permissions, ENOSPC — must neither be silent nor spam reconnect loops)."""
++        if "pytest" in sys.modules and not os.environ.get("HERMES_HOME", "").strip():
++            logger.debug(
++                "Skipping runtime status write for %s during an unscoped test",
++                self.platform.value,
++            )
++            return
+         try:
+             from gateway.status import write_runtime_status
+             # Multiplexed adapters share the status file; the runner stamps
+@@ -2804,6 +2810,18 @@ class BasePlatformAdapter(ABC):
+         return await self._send_media_fallback_notice(
+             "send_image_file", "image", image_path, chat_id, caption, reply_to, metadata)
+ 
++    async def send_text_with_image(
++        self, chat_id: str, content: str, image_path: str,
++        reply_to: Optional[str] = None,
++        metadata: Optional[Dict[str, Any]] = None,
++    ) -> Optional[SendResult]:
++        """Send text and one local image in one native platform message.
++
++        ``None`` means unsupported and lets the dispatcher use its existing
++        text-then-media fallback.
++        """
++        return None
++
+     @staticmethod
+     def validate_media_delivery_path(path: str, session_key: str = "") -> Optional[str]:
+         """Return a resolved path if it is safe for native attachment upload."""
+@@ -3081,6 +3099,10 @@ class BasePlatformAdapter(ABC):
+     async def on_processing_start(self, event: MessageEvent) -> None:
+         """Hook called when background processing begins."""
+ 
++    async def send_processing_ack(self, event: MessageEvent, session_key: str) -> None:
++        """Send an immediate acknowledgement on platforms that need one."""
++        del event, session_key
++
+     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
+         """Hook called when background processing completes. Default: opt-in reaction ack — with
+         ``_OK_EMOJI``/``_FAIL_EMOJI`` set and ``_add_reaction``/``_remove_reaction`` present, swap
+@@ -3722,25 +3744,70 @@ class BasePlatformAdapter(ABC):
+         except Exception as batch_err:
+             logger.warning("[%s] Error batching images: %s", self.name, batch_err, exc_info=True)
+ 
++    @staticmethod
++    def _single_text_image_path(extracted: "_ExtractedResponse") -> Optional[str]:
++        """Return the sole local image when a transport can combine it with text."""
++        if extracted.images or extracted.force_document_attachments:
++            return None
++        candidates: list[str] = []
++        for path, is_voice in extracted.media_files:
++            if is_voice or Path(path).suffix.lower() not in _IMAGE_EXTS:
++                return None
++            candidates.append(path)
++        for path in extracted.local_files:
++            if Path(path).suffix.lower() not in _IMAGE_EXTS:
++                return None
++            candidates.append(path)
++        return candidates[0] if len(candidates) == 1 else None
++
+     async def _send_final_text(
+         self, event: MessageEvent, session_key: str, text_content: str, metadata: Dict[str, Any],
+-        is_ephemeral_response: bool, ephemeral_ttl: int, record_delivery: Callable) -> None:
++        is_ephemeral_response: bool, ephemeral_ttl: int, record_delivery: Callable,
++        combined_image_path: Optional[str] = None,
++    ) -> bool:
+         """Send the final text on the CURRENT transport (a reconnect may have replaced
+-        this adapter), ledger-bracketed; the message-id owner owns the ephemeral delete."""
++        this adapter), ledger-bracketed; return whether one image was combined."""
+         delivery_adapter = self._final_delivery_adapter(event.source)
+         logger.info("[%s] Sending response (%d chars) to %s", delivery_adapter.name,
+                     len(text_content), event.source.chat_id)
+         _obligation_id = await self._record_delivery_obligation(
+             event, session_key, text_content, delivery_adapter, is_ephemeral_response)
+-        result = await delivery_adapter._send_with_retry(
+-            chat_id=event.source.chat_id, content=text_content,
+-            reply_to=_reply_anchor_for_event(event), metadata=metadata)
++        result = None
++        combined = False
++        if combined_image_path:
++            try:
++                result = await delivery_adapter.send_text_with_image(
++                    chat_id=event.source.chat_id,
++                    content=text_content,
++                    image_path=combined_image_path,
++                    reply_to=_reply_anchor_for_event(event),
++                    metadata=metadata,
++                )
++            except Exception as combined_err:
++                logger.warning(
++                    "[%s] Combined text/image delivery failed; falling back to separate sends: %s",
++                    delivery_adapter.name, combined_err,
++                )
++                result = None
++            if result is not None and result.success:
++                combined = True
++            elif result is not None:
++                logger.warning(
++                    "[%s] Combined text/image delivery returned failure; falling back to separate sends: %s",
++                    delivery_adapter.name, result.error,
++                )
++                result = None
++        if result is None:
++            result = await delivery_adapter._send_with_retry(
++                chat_id=event.source.chat_id, content=text_content,
++                reply_to=_reply_anchor_for_event(event), metadata=metadata)
+         record_delivery(result)
+         if _obligation_id is not None:
+             await self._finalize_delivery_obligation(_obligation_id, result, event, delivery_adapter)
+         if ephemeral_ttl and ephemeral_ttl > 0 and result.success and result.message_id:
+             delivery_adapter._schedule_ephemeral_delete(
+                 event.source.chat_id, result.message_id, ephemeral_ttl)
++        return combined
+ 
+     async def _notify_turn_error(self, event: MessageEvent, e: BaseException) -> Optional[dict]:
+         """Tell the user a turn failed rather than leaving radio silence (last resort:
+@@ -3888,6 +3955,13 @@ class BasePlatformAdapter(ABC):
+         typing_task = self._start_typing_refresh(event, interrupt_event, _thread_metadata)
+         try:
+             await self._run_processing_hook("on_processing_start", event)
++            try:
++                await self.send_processing_ack(event, session_key)
++            except Exception as ack_err:
++                logger.debug(
++                    "[%s] processing ack failed for %s: %s",
++                    self.name, event.source.chat_id, ack_err, exc_info=True,
++                )
+             response = await self._message_handler(event)
+             is_ephemeral_response = isinstance(response, EphemeralReply)
+             # Unwrap EphemeralReply for downstream text processing; TTL applies after send.
+@@ -3923,20 +3997,44 @@ class BasePlatformAdapter(ABC):
+                     with contextlib.suppress(OSError):
+                         os.remove(_tts_requested_path)
+                 if text_content and not _tts_caption_delivered:
+-                    await self._send_final_text(
++                    combined_image_path = (
++                        None if _tts_paths else self._single_text_image_path(extracted)
++                    )
++                    combined = await self._send_final_text(
+                         event, session_key, text_content, _final_thread_metadata,
+-                        is_ephemeral_response, _ephemeral_ttl, _record_delivery)
++                        is_ephemeral_response, _ephemeral_ttl, _record_delivery,
++                        combined_image_path=combined_image_path,
++                    )
++                    if combined and combined_image_path:
++                        extracted.media_files = [
++                            item for item in extracted.media_files
++                            if item[0] != combined_image_path
++                        ]
++                        extracted.local_files = [
++                            path for path in extracted.local_files
++                            if path != combined_image_path
++                        ]
+                 await self._deliver_attachments(
+                     event, extracted, _final_thread_metadata,
+                     anything_sent=delivery_attempted or _tts_caption_delivered)
+             processing_ok = delivery_succeeded if delivery_attempted else not bool(response)
++            explicit_outcome = getattr(event, "_gateway_processing_outcome", None)
++            processing_outcome = (
++                explicit_outcome
++                if isinstance(explicit_outcome, ProcessingOutcome)
++                else (
++                    ProcessingOutcome.SUCCESS
++                    if processing_ok
++                    else ProcessingOutcome.FAILURE
++                )
++            )
+             # Clean up the per-turn streaming-TTS flag.
+             self._streaming_tts_completed_turns.discard(self._streaming_tts_turn_key(
+                 session_key, getattr(interrupt_event, "_hermes_run_generation", None),
+                 event=event) or "")
+             await self._run_processing_hook(
+                 "on_processing_complete", event,
+-                ProcessingOutcome.SUCCESS if processing_ok else ProcessingOutcome.FAILURE)
++                processing_outcome)
+             # Force-flush an unfired debounce timer so this task hands off to a fresh drain task.
+             # Clear the Event BEFORE the stop-typing await so concurrent inbound sees a live guard.
+             await self._flush_text_debounce_now(session_key)
+diff --git a/gateway/platforms/weixin.py b/gateway/platforms/weixin.py
+index 2f4e97f..681bbb5 100644
+--- a/gateway/platforms/weixin.py
++++ b/gateway/platforms/weixin.py
+@@ -342,7 +342,14 @@ async def _upload_ciphertext(session: "aiohttp.ClientSession", *, ciphertext: by
+                 return encrypted_param
+             raw = (await response.text())[:200]
+             raise RuntimeError(f"CDN upload missing x-encrypted-param header: {raw}" if response.status == 200 else f"CDN upload HTTP {response.status}: {raw}")
+-    return await asyncio.wait_for(_do(), timeout=120)
++    for attempt in range(3):
++        try:
++            return await asyncio.wait_for(_do(), timeout=120)
++        except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
++            if attempt == 2:
++                raise
++            await asyncio.sleep(0.5 * (2 ** attempt))
++    raise RuntimeError("unreachable")
+ 
+ 
+ async def _download_bytes(session: "aiohttp.ClientSession", *, url: str, timeout_seconds: float = 60.0) -> bytes:
+@@ -428,6 +435,84 @@ def _wrap_copy_friendly_lines_for_weixin(content: str) -> str:
+     return "\n".join(wrapped).strip()
+ 
+ 
++def _compose_text_image_for_weixin(content: str, image_path: str) -> str:
++    """Render text above an image because iLink rejects mixed item payloads."""
++    from PIL import Image, ImageDraw, ImageFont
++
++    plain = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", content or "")
++    plain = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", plain)
++    plain = re.sub(r"(?m)^\s*#{1,6}\s*", "", plain)
++    plain = re.sub(r"(?m)^\s*[-*+]\s+", "• ", plain)
++    plain = plain.replace("**", "").replace("__", "").replace("`", "").strip()
++
++    source = Image.open(image_path).convert("RGB")
++    margin = 64
++    canvas_width = max(960, min(1600, source.width + margin * 2))
++    available_width = canvas_width - margin * 2
++    if source.width > available_width:
++        ratio = available_width / source.width
++        source = source.resize(
++            (available_width, max(1, round(source.height * ratio))),
++            Image.Resampling.LANCZOS,
++        )
++
++    font = None
++    for font_path in (
++        "/System/Library/Fonts/PingFang.ttc",
++        "/System/Library/Fonts/STHeiti Medium.ttc",
++        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
++        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
++        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
++    ):
++        try:
++            font = ImageFont.truetype(font_path, 40)
++            break
++        except (OSError, ValueError):
++            continue
++    font = font or ImageFont.load_default()
++    probe = ImageDraw.Draw(Image.new("RGB", (1, 1)))
++
++    lines: List[str] = []
++    for paragraph in plain.splitlines() or [""]:
++        if not paragraph:
++            lines.append("")
++            continue
++        current = ""
++        for char in paragraph:
++            candidate = current + char
++            box = probe.textbbox((0, 0), candidate, font=font)
++            if current and box[2] - box[0] > available_width:
++                lines.append(current)
++                current = char
++            else:
++                current = candidate
++        lines.append(current)
++
++    line_height = 58
++    text_height = margin + max(1, len(lines)) * line_height + 44
++    canvas = Image.new(
++        "RGB", (canvas_width, text_height + source.height + margin), "white"
++    )
++    draw = ImageDraw.Draw(canvas)
++    y = margin
++    for line in lines:
++        if line:
++            draw.text((margin, y), line, font=font, fill=(20, 20, 20))
++        y += line_height
++    draw.line(
++        (margin, text_height - 20, canvas_width - margin, text_height - 20),
++        fill=(220, 220, 220), width=2,
++    )
++    canvas.paste(source, ((canvas_width - source.width) // 2, text_height))
++
++    handle = tempfile.NamedTemporaryFile(
++        prefix="hermes-weixin-card-", suffix=".png", delete=False
++    )
++    handle.close()
++    canvas.save(handle.name, format="PNG", optimize=True)
++    return handle.name
++
++
+ def _split_markdown_blocks(content: str) -> List[str]:
+     blocks: List[str] = []
+     current: List[str] = []
+@@ -726,6 +811,17 @@ class WeixinAdapter(BasePlatformAdapter):
+         self._allow_from = self._coerce_list(_wx_secret("WEIXIN_ALLOWED_USERS", "") if allow_from is None else allow_from)
+         self._group_allow_from = self._coerce_list(_wx_secret("WEIXIN_GROUP_ALLOWED_USERS", "") if group_allow_from is None else group_allow_from)
+         self._split_multiline_messages = _coerce_bool(extra.get("split_multiline_messages") or os.getenv("WEIXIN_SPLIT_MULTILINE_MESSAGES"), default=False)
++        self._processing_ack_enabled = _coerce_bool(
++            extra.get("processing_ack_enabled")
++            if "processing_ack_enabled" in extra
++            else os.getenv("WEIXIN_PROCESSING_ACK_ENABLED"),
++            default=True,
++        )
++        self._processing_ack_text = str(
++            extra.get("processing_ack_text")
++            or os.getenv("WEIXIN_PROCESSING_ACK_TEXT")
++            or "已收到，思考中"
++        ).strip()
+         # Text debounce batching (Telegram pattern): iLink delivers messages individually, so rapid bursts would each
+         # trigger a separate agent run. 3s / 5s (after a ~2048-char split chunk) suit iLink's cadence.
+         self._text_batch_delay_seconds = self._coerce_float_extra("text_batch_delay_seconds", 3.0)
+@@ -1098,6 +1194,15 @@ class WeixinAdapter(BasePlatformAdapter):
+             logger.error("[%s] send failed to=%s: %s", self.name, _safe_id(chat_id), exc)
+             return SendResult(success=False, error=str(exc))
+ 
++    async def send_processing_ack(self, event: MessageEvent, session_key: str) -> None:
++        """Acknowledge a normal Weixin turn before model work begins."""
++        del session_key
++        if not self._processing_ack_enabled or not self._processing_ack_text:
++            return
++        if (event.text or "").strip().startswith("/"):
++            return
++        await self.send(event.source.chat_id, self._processing_ack_text)
++
+     async def _ensure_typing_ticket(self, chat_id: str) -> Optional[str]:
+         """Return a valid typing ticket, refreshing via getConfig once the 600s TTL evicts it —
+         otherwise ``stop_typing`` no-ops and the WeChat client shows the indicator forever."""
+@@ -1139,6 +1244,34 @@ class WeixinAdapter(BasePlatformAdapter):
+     async def send_image_file(self, chat_id: str, image_path: str, caption: Optional[str] = None, reply_to=None, metadata=None, **kwargs) -> SendResult:
+         return await self.send_document(chat_id=chat_id, file_path=image_path, caption=caption, metadata=metadata)
+ 
++    async def send_text_with_image(
++        self, chat_id: str, content: str, image_path: str,
++        reply_to: Optional[str] = None,
++        metadata: Optional[Dict[str, Any]] = None,
++    ) -> Optional[SendResult]:
++        del reply_to
++        composite_path: Optional[str] = None
++        try:
++            composite_path = await asyncio.to_thread(
++                _compose_text_image_for_weixin, content, image_path
++            )
++            return await self.send_image_file(
++                chat_id=chat_id,
++                image_path=composite_path,
++                caption=None,
++                metadata=metadata,
++            )
++        except Exception as exc:
++            logger.error(
++                "[%s] text/image composition failed for %s: %s",
++                self.name, _safe_id(chat_id), exc,
++            )
++            return SendResult(success=False, error=str(exc))
++        finally:
++            if composite_path:
++                with contextlib.suppress(OSError):
++                    os.unlink(composite_path)
++
+     async def _send_file_result(self, chat_id: str, path: str, caption: str, label: str, **kwargs: Any) -> SendResult:
+         if not self._send_session or not self._token:
+             return SendResult(success=False, error="Not connected")
+@@ -1195,14 +1328,69 @@ class WeixinAdapter(BasePlatformAdapter):
+             "ciphertext_size": len(ciphertext), "plaintext_size": rawsize, "filename": Path(path).name, "rawfilemd5": rawfilemd5}
+         if media_type == MEDIA_VOICE and path.endswith(".silk"):
+             item_kwargs.update(encode_type=6, sample_rate=24000, bits_per_sample=16)
+-        if caption:
+-            await _send_message(
+-                self._send_session, base_url=self._base_url, token=self._token, to=chat_id, text=self.format_message(caption),
+-                context_token=context_token, client_id=f"hermes-weixin-{uuid.uuid4().hex}")
+         last_message_id = f"hermes-weixin-{uuid.uuid4().hex}"
+-        await _send_items(
+-            self._send_session, base_url=self._base_url, token=self._token, to=chat_id, item_list=[item_builder(**item_kwargs)],
+-            context_token=context_token, client_id=last_message_id)
++        item_list: List[Dict[str, Any]] = []
++        formatted_caption = self.format_message(caption)
++        if formatted_caption:
++            item_list.append({
++                "type": ITEM_TEXT,
++                "text_item": {"text": formatted_caption},
++            })
++        item_list.append(item_builder(**item_kwargs))
++
++        async def _post_media_message(
++            active_context_token: Optional[str],
++        ) -> Dict[str, Any]:
++            message: Dict[str, Any] = {
++                "from_user_id": "",
++                "to_user_id": chat_id,
++                "client_id": last_message_id,
++                "message_type": MSG_TYPE_BOT,
++                "message_state": MSG_STATE_FINISH,
++                "item_list": item_list,
++            }
++            if active_context_token:
++                message["context_token"] = active_context_token
++            return await _api_post(
++                self._send_session,
++                base_url=self._base_url,
++                endpoint=EP_SEND_MESSAGE,
++                payload={"msg": message},
++                token=self._token,
++                timeout_ms=API_TIMEOUT_MS,
++            )
++
++        response = await _post_media_message(context_token)
++        ret = response.get("ret") if isinstance(response, dict) else None
++        errcode = response.get("errcode") if isinstance(response, dict) else None
++        failed = (
++            (ret is not None and ret != 0)
++            or (errcode is not None and errcode != 0)
++        )
++        if failed and context_token and (
++            ret == SESSION_EXPIRED_ERRCODE
++            or errcode == SESSION_EXPIRED_ERRCODE
++            or _is_stale_session_ret(ret, errcode, response.get("errmsg"))
++        ):
++            logger.warning(
++                "[%s] media session expired for %s; retrying without context_token",
++                self.name, _safe_id(chat_id),
++            )
++            self._token_store._cache.pop(
++                self._token_store._key(self._account_id, chat_id), None
++            )
++            response = await _post_media_message(None)
++            ret = response.get("ret") if isinstance(response, dict) else None
++            errcode = response.get("errcode") if isinstance(response, dict) else None
++            failed = (
++                (ret is not None and ret != 0)
++                or (errcode is not None and errcode != 0)
++            )
++        if failed:
++            errmsg = response.get("errmsg") or response.get("msg") or "unknown error"
++            raise RuntimeError(
++                f"iLink media send error: ret={ret} errcode={errcode} errmsg={errmsg}"
++            )
+         return last_message_id
+ 
+     def _outbound_media_builder(self, path: str, force_file_attachment: bool = False):
+@@ -1226,12 +1414,23 @@ async def _deliver_direct(
+     adapter: WeixinAdapter, chat_id: str, message: str, media_files: Optional[List[Tuple[str, bool]]], context_token: Optional[str],
+ ) -> Dict[str, Any]:
+     last_result: Optional[SendResult] = None
++    pending_media = list(media_files or [])
+     cleaned = adapter.format_message(message)
+-    if cleaned:
++    if (
++        cleaned
++        and len(pending_media) == 1
++        and not pending_media[0][1]
++        and Path(pending_media[0][0]).suffix.lower() in _DIRECT_IMAGE_EXTS
++    ):
++        last_result = await adapter.send_text_with_image(
++            chat_id, cleaned, pending_media[0][0]
++        )
++        pending_media = []
++    elif cleaned:
+         last_result = await adapter.send(chat_id, cleaned)
+-        if not last_result.success:
+-            return {"error": f"Weixin send failed: {last_result.error}"}
+-    for media_path, _is_voice in media_files or []:
++    if last_result is not None and not last_result.success:
++        return {"error": f"Weixin send failed: {last_result.error}"}
++    for media_path, _is_voice in pending_media:
+         sender = adapter.send_image_file if Path(media_path).suffix.lower() in _DIRECT_IMAGE_EXTS else adapter.send_document
+         last_result = await sender(chat_id, media_path)
+         if not last_result.success:
+diff --git a/gateway/run_notifications.py b/gateway/run_notifications.py
+index fc356f6..780e3ae 100644
+--- a/gateway/run_notifications.py
++++ b/gateway/run_notifications.py
+@@ -17,7 +17,7 @@ from pathlib import Path
+ from typing import Any, Dict, Optional, cast
+ 
+ from gateway.config import Platform, _BUILTIN_PLATFORM_VALUES
+-from gateway.platforms.base import MessageEvent, MessageType
++from gateway.platforms.base import MessageEvent, MessageType, ProcessingOutcome
+ from gateway.session import SessionEntry, SessionSource
+ from gateway.run_shutdown import _log_suppressed, _notice_target_key, _send_error, _send_failed
+ 
+@@ -70,6 +70,7 @@ class GatewayNotificationsMixin:
+         session_key: Optional[str]
+         metadata: Any
+         platform: Any
++        message_id: Optional[str] = None
+ 
+         def send_metadata(self):
+             from gateway.run import _non_conversational_metadata
+@@ -380,7 +381,8 @@ class GatewayNotificationsMixin:
+                 metadata = self._pending_marker_metadata(platform, chat_id, pending, adapter)
+                 # Fallback session key if not stored (old pending files)
+                 return self._UpdateTarget(
+-                    adapter, chat_id, session_key or f"{platform_str}:{chat_id}", metadata, platform,
++                    adapter, chat_id, session_key or f"{platform_str}:{chat_id}",
++                    metadata, platform, str(pending.get("message_id") or "") or None,
+                 )
+         return None
+ 
+@@ -477,13 +479,48 @@ class GatewayNotificationsMixin:
+         bytes_sent = 0
+         last_stream_time = loop.time()
+         buffer = ""
++        stream_message_id: Optional[str] = None
++        stream_visible = ""
++        use_single_stream_card = (
++            getattr(type(target.adapter), "REQUIRES_EDIT_FINALIZE", False) is True
++        )
+ 
+-        async def _flush_buffer() -> None:
+-            nonlocal buffer, last_stream_time
++        async def _flush_buffer(*, finalize: bool = False) -> None:
++            nonlocal buffer, last_stream_time, stream_message_id, stream_visible
+             text, buffer = buffer, ""
+-            if text.strip():
+-                last_stream_time = loop.time()
++            if not text.strip():
++                return
++            last_stream_time = loop.time()
++            if not use_single_stream_card:
+                 await self._send_update_output(target, text)
++                return
++
++            from tools.ansi_strip import strip_ansi
++            clean = strip_ansi(text).replace("```", "").strip()
++            if not clean:
++                return
++            stream_visible = "\n".join(
++                part for part in (stream_visible, clean) if part
++            )
++            if len(stream_visible) > 3500:
++                stream_visible = "…\n" + stream_visible[-3498:]
++            metadata = dict(target.send_metadata() or {})
++            if stream_message_id:
++                result = await target.adapter.edit_message(
++                    target.chat_id,
++                    stream_message_id,
++                    stream_visible,
++                    finalize=finalize,
++                    metadata=metadata,
++                )
++            else:
++                if not finalize:
++                    metadata["expect_edits"] = True
++                result = await target.adapter.send(
++                    target.chat_id, stream_visible, metadata=metadata
++                )
++                if getattr(result, "success", False) and getattr(result, "message_id", None):
++                    stream_message_id = str(result.message_id)
+ 
+         def _read_new_output() -> None:
+             nonlocal buffer, bytes_sent
+@@ -495,13 +532,24 @@ class GatewayNotificationsMixin:
+         while loop.time() < deadline:
+             if paths.exit_code.exists():
+                 _read_new_output()
+-                await _flush_buffer()
++                exit_code = self._update_exit_code(paths)
++                buffer += (
++                    "\nHermes update finished."
++                    if exit_code == 0
++                    else f"\nHermes update failed (exit code {exit_code})."
++                )
+                 with _log_suppressed(logging.WARNING, "Update final notification failed: %s"):
+-                    exit_code = self._update_exit_code(paths)
+-                    await target.send(
+-                        "✅ Hermes update finished." if exit_code == 0
+-                        else "❌ Hermes update failed (exit code {}).".format(exit_code)
++                    await _flush_buffer(finalize=True)
++                    finalize_reaction = getattr(
++                        target.adapter, "finalize_processing_reaction", None
+                     )
++                    if callable(finalize_reaction) and target.message_id:
++                        await finalize_reaction(
++                            target.message_id,
++                            ProcessingOutcome.SUCCESS
++                            if exit_code == 0
++                            else ProcessingOutcome.FAILURE,
++                        )
+                     logger.info("Update finished (exit=%s), notified %s", exit_code, session_key)
+                 self._clear_update_markers(paths, session_key)
+                 return
+@@ -527,7 +575,15 @@ class GatewayNotificationsMixin:
+             paths.exit_code.write_text("124", encoding="utf-8")
+             await _flush_buffer()
+             with suppress(Exception):
+-                await target.send("❌ Hermes update timed out after 30 minutes.")
++                buffer += "\nHermes update timed out after 30 minutes."
++                await _flush_buffer(finalize=True)
++                finalize_reaction = getattr(
++                    target.adapter, "finalize_processing_reaction", None
++                )
++                if callable(finalize_reaction) and target.message_id:
++                    await finalize_reaction(
++                        target.message_id, ProcessingOutcome.FAILURE
++                    )
+             self._clear_update_markers(paths, session_key)
+ 
+     async def _send_update_notification(self) -> bool:
+diff --git a/gateway/run_turn.py b/gateway/run_turn.py
+index 3b7ee87..594a1cd 100644
+--- a/gateway/run_turn.py
++++ b/gateway/run_turn.py
+@@ -20,7 +20,7 @@ from contextlib import nullcontext, suppress
+ from contextvars import copy_context
+ from gateway.config import Platform
+ from gateway.media_repair import repair_explicit_computer_use_media_paths
+-from gateway.platforms.base import BasePlatformAdapter, MessageEvent
++from gateway.platforms.base import BasePlatformAdapter, MessageEvent, ProcessingOutcome
+ from gateway.session import (
+     SessionSource, _session_key_namespace, build_channel_continuity_note,
+     build_session_context,
+@@ -1457,6 +1457,8 @@ class GatewayTurnMixin:
+     def _hmwa_runtime_footer_line(self, agent_result, source, _turn_seconds):
+         """Runtime-metadata footer for the FINAL message of the turn; off by default
+         (display.runtime_footer.enabled=false)."""
++        if agent_result.get("feishu_stream_footer_embedded"):
++            return ""
+         from gateway.run import _load_gateway_config, _platform_config_key, _terminal_scope_cwd
+         try:
+             from gateway.runtime_footer import build_footer_line as _bfl
+@@ -1987,6 +1989,11 @@ class GatewayTurnMixin:
+             agent_failed_early, hidden_reasoning_incomplete, is_context_overflow_failure = (
+                 self._hmwa_classify_turn_failure(agent_result, history, session_entry)
+             )
++            event._gateway_processing_outcome = (
++                ProcessingOutcome.FAILURE
++                if agent_failed_early or hidden_reasoning_incomplete or is_context_overflow_failure
++                else ProcessingOutcome.SUCCESS
++            )
+             response, session_entry = await self._hmwa_compression_exhaustion_reset(
+                 agent_result, response, session_entry, session_key, source,
+             )
+@@ -2003,6 +2010,7 @@ class GatewayTurnMixin:
+             )
+ 
+         except Exception as e:
++            event._gateway_processing_outcome = ProcessingOutcome.FAILURE
+             return await self._hmwa_agent_error_reply(e, event, source, session_entry, session_key, prepared)
+         finally:
+             # Restore session context variables to their pre-handler state
+@@ -3484,11 +3492,24 @@ class GatewayTurnMixin:
+         # whole _run_agent chain unwinds — too late for the in-band follow-up. Use the same (session_key,
+         # session_id) the recursive call runs under so the snapshot matches exactly what the follow-up's
+         # guard will consult. Fail-safe in helper.
+-        await self._refresh_agent_cache_message_count(session_key, session_id)
++        # Compression can rotate the session during the first turn.  Keep an in-band queued
++        # follow-up on that live child instead of reopening the closed parent captured at launch.
++        followup_session_id = session_id
++        result_session_id = result.get("session_id") if isinstance(result, dict) else None
++        if not result_session_id and turn_ctx.agent_holder:
++            result_session_id = getattr(turn_ctx.agent_holder[0], "session_id", None)
++        bound_entry = None
++        if next_session_key == session_key:
++            bound_entry = getattr(self.session_store, "_entries", {}).get(session_key)
++        bound_session_id = getattr(bound_entry, "session_id", None)
++        if result_session_id and result_session_id == bound_session_id:
++            followup_session_id = result_session_id
++
++        await self._refresh_agent_cache_message_count(session_key, followup_session_id)
+ 
+         followup_result = await self._run_agent(
+             message=next_message, context_prompt=turn_ctx.context_prompt, history=updated_history,
+-            source=next_source, session_id=session_id, session_key=next_session_key,
++            source=next_source, session_id=followup_session_id, session_key=next_session_key,
+             run_generation=run_generation, _interrupt_depth=_interrupt_depth + 1,
+             event_message_id=next_message_id, channel_prompt=next_channel_prompt,
+             message_type=next_message_type,
+@@ -3752,6 +3773,12 @@ class GatewayTurnMixin:
+                 else f"⏳ Working — {_elapsed_mins} min{_status_detail}"
+             )
+             try:
++                _stream_consumer = turn_ctx.stream_consumer_holder[0]
++                if _stream_consumer is not None and getattr(
++                    _stream_consumer, "keeps_progress_in_stream", False
++                ):
++                    _stream_consumer.on_tool_progress(_heartbeat_text)
++                    continue
+                 _notify_res = None
+                 if _heartbeat_msg_id:
+                     try:
+@@ -3810,6 +3837,13 @@ class GatewayTurnMixin:
+             source, message_type, _status_thread_metadata, turn_ctx.streaming_tts_consumer_holder,
+         )
+ 
++        # Feishu CardKit should appear immediately, before provider/auth/model setup can make the
++        # chat look idle.  ``run_sync`` reuses this same consumer and wires the real token callback.
++        _adapter = self._adapter_for_source(source)
++        if getattr(type(_adapter), "STREAM_PROGRESS_IN_CONTENT", False) is True:
++            turn_runner._setup_stream_consumer(disp.platform_key)
++        turn_ctx.agent_run_started_at = time.monotonic()
++
+         # Progress sender drains BOTH tool-progress lines and thinking bubbles (needs_progress_queue).
+         spawn = asyncio.create_task
+         progress_task = spawn(turn_runner.send_progress_messages()) if disp.needs_progress_queue else None
+diff --git a/gateway/run_turn_runner.py b/gateway/run_turn_runner.py
+index 6449454..08af572 100644
+--- a/gateway/run_turn_runner.py
++++ b/gateway/run_turn_runner.py
+@@ -580,11 +580,42 @@ class TurnRunner:
+             st.progress_msg_id = result.message_id
+         return True
+ 
++    async def _send_inline_stream_progress(self, stream_consumer) -> None:
++        """Forward queued thinking/status items into the existing editable stream card."""
++        ctx = self._ctx
++        try:
++            while ctx._run_still_current():
++                try:
++                    raw = ctx.progress_queue.get_nowait()
++                except queue.Empty:
++                    await asyncio.sleep(0.1)
++                    continue
++                if self._agent_interrupted() or self._is_reset_marker(raw):
++                    continue
++                if isinstance(raw, tuple) and len(raw) == 3 and raw[0] == "__dedup__":
++                    _, base_msg, count = raw
++                    stream_consumer.on_tool_progress(
++                        f"{base_msg} (×{count + 1})", replace_last=True
++                    )
++                    continue
++                if isinstance(raw, tuple) and len(raw) == 2 and raw[0] == "__replace_last__":
++                    stream_consumer.on_tool_progress(str(raw[1]), replace_last=True)
++                    continue
++                stream_consumer.on_tool_progress(str(raw))
++        except asyncio.CancelledError:
++            return
++
+     async def send_progress_messages(self):
+         ctx = self._ctx
+         adapter = self._runner._adapter_for_source(ctx.source) if ctx.progress_queue else None
+         if not adapter:
+             return
++        stream_consumer = self._stream_consumer()
++        if stream_consumer is not None and getattr(
++            stream_consumer, "keeps_progress_in_stream", False
++        ):
++            await self._send_inline_stream_progress(stream_consumer)
++            return
+         if ctx._native_slack_task_cards and hasattr(adapter, "send_native_task_card_progress"):
+             await self._send_native_task_card_progress(adapter)
+             return
+@@ -772,6 +803,12 @@ class TurnRunner:
+                 _redact_gateway_user_facing_secrets(str(message or ""))[:160],
+             )
+             return
++        stream_consumer = self._stream_consumer()
++        if stream_consumer is not None and getattr(
++            stream_consumer, "keeps_progress_in_stream", False
++        ):
++            stream_consumer.on_tool_progress(prepared)
++            return
+         fut = self._schedule(
+             _send_or_update_status_coro(ctx._status_adapter, ctx._status_chat_id, event_type, prepared, ctx._status_thread_metadata),
+             f"status_callback ({event_type}) scheduling error",
+@@ -783,7 +820,7 @@ class TurnRunner:
+ 
+     def _setup_stream_consumer(self, platform_key):
+         ctx = self._ctx
+-        stream_consumer = None
++        stream_consumer = self._stream_consumer()
+         # The streaming-TTS consumer is created on the outer loop thread before run_sync launches;
+         # run_sync only reads it via the holder for delta-callback wiring.
+         stts = ctx.streaming_tts_consumer_holder[0]
+@@ -799,9 +836,10 @@ class TurnRunner:
+         want_interim_messages = ctx.interim_assistant_messages_enabled
+         if want_stream_deltas or want_interim_messages:
+             try:
+-                from gateway.stream_consumer import GatewayStreamConsumer
+                 adapter = self._runner._adapter_for_source(ctx.source)
+-                if adapter:
++                if stream_consumer is None and adapter:
++                    from gateway.stream_consumer import GatewayStreamConsumer
++
+                     consumer_cfg, pause_typing_before_finalize = self._runner._build_stream_consumer_config(
+                         ctx.source, scfg, adapter, on_missing_cursor="raise",
+                     )
+@@ -815,6 +853,10 @@ class TurnRunner:
+                         initial_reply_to_id=ctx.event_message_id, run_still_current=ctx._run_still_current,
+                     )
+                     ctx.stream_consumer_holder[0] = stream_consumer
++                    if getattr(stream_consumer, "keeps_progress_in_stream", False):
++                        stream_consumer.on_tool_progress(
++                            "已收到消息，正在启动模型和工具调度"
++                        )
+             except Exception as err:
+                 logger.debug("Could not set up stream consumer: %s", err)
+         # Deltas tee to the stream consumer (when text streaming is on) and to streaming TTS.
+@@ -824,13 +866,22 @@ class TurnRunner:
+             def stream_delta_cb(text: str) -> None:
+                 if ctx._run_still_current():
+                     for sink in delta_sinks:
++                        if (
++                            text is None
++                            and sink is stream_consumer
++                            and getattr(stream_consumer, "keeps_progress_in_stream", False)
++                        ):
++                            continue
+                         sink.on_delta(text)
+ 
+         def interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
+             if not ctx._run_still_current():
+                 return
+             if stream_consumer is not None:
+-                stream_consumer.on_segment_break() if already_streamed else stream_consumer.on_commentary(text)
++                if getattr(stream_consumer, "keeps_progress_in_stream", False):
++                    stream_consumer.on_tool_progress(str(text or ""))
++                else:
++                    stream_consumer.on_segment_break() if already_streamed else stream_consumer.on_commentary(text)
+             elif not already_streamed and ctx._status_adapter and str(text or "").strip():
+                 self._send_status_text(text, ctx._status_thread_metadata, "interim_assistant_callback scheduling error")
+ 
+@@ -1014,8 +1065,61 @@ class TurnRunner:
+                     cache[ctx.session_key] = (agent, sig, msg_count, ctx.session_id)
+                     runner._enforce_agent_cache_cap()
+             logger.debug("Created new agent for session %s (sig=%s)", ctx.session_key, sig)
++        self._apply_channel_compression_override(agent, platform_key)
+         return agent, found.reused
+ 
++    def _apply_channel_compression_override(self, agent, platform_key: str) -> None:
++        """Apply the configured per-chat compression threshold to fresh and cached agents."""
++        cfg = self._ctx.user_config if isinstance(self._ctx.user_config, dict) else {}
++        platforms = cfg.get("platforms")
++        platform_cfg = platforms.get(platform_key) if isinstance(platforms, dict) else None
++        overrides = None
++        if isinstance(platform_cfg, dict):
++            extra = platform_cfg.get("extra")
++            if isinstance(extra, dict):
++                overrides = extra.get("channel_compression_overrides")
++            if not isinstance(overrides, dict):
++                overrides = platform_cfg.get("channel_compression_overrides")
++        if not isinstance(overrides, dict):
++            legacy = cfg.get(platform_key)
++            overrides = (
++                legacy.get("channel_compression_overrides")
++                if isinstance(legacy, dict)
++                else None
++            )
++        if not isinstance(overrides, dict):
++            return
++
++        source = self._ctx.source
++        keys = []
++        for attr in ("chat_id", "thread_id", "user_id", "user_id_alt"):
++            value = str(getattr(source, attr, "") or "").strip()
++            if value and value not in keys:
++                keys.append(value)
++        keys.append("*")
++        raw = next((overrides[key] for key in keys if key in overrides), None)
++        if raw is None:
++            return
++        override = dict(raw) if isinstance(raw, dict) else {"threshold": raw}
++        compressor = getattr(agent, "context_compressor", None)
++        if compressor is None:
++            return
++        try:
++            threshold = float(override["threshold"])
++        except (KeyError, TypeError, ValueError):
++            threshold = None
++        if threshold is not None and hasattr(compressor, "threshold_percent"):
++            compressor.threshold_percent = threshold
++            context_length = int(getattr(compressor, "context_length", 0) or 0)
++            threshold_tokens = int(context_length * threshold)
++            if context_length > 0 and hasattr(compressor, "threshold_tokens"):
++                compressor.threshold_tokens = threshold_tokens
++            if context_length > 0 and hasattr(compressor, "tail_token_budget"):
++                ratio = float(getattr(compressor, "summary_target_ratio", 0.20) or 0.20)
++                compressor.tail_token_budget = int(threshold_tokens * ratio)
++        if "protect_last_n" in override and hasattr(compressor, "protect_last_n"):
++            compressor.protect_last_n = int(override["protect_last_n"])
++
+     # ── per-turn agent wiring ───────────────────────────────────────────────────────────────
+ 
+     def _notice_callback_sync(self, notice) -> None:
+@@ -1060,6 +1164,12 @@ class TurnRunner:
+         def send(message: str) -> None:
+             if not self._status_live():
+                 return
++            stream_consumer = self._stream_consumer()
++            if stream_consumer is not None and getattr(
++                stream_consumer, "keeps_progress_in_stream", False
++            ):
++                stream_consumer.on_tool_progress(str(message or ""))
++                return
+             if not release_evt.is_set():
+                 with pending_lock:
+                     if not release_evt.is_set():
+@@ -1448,6 +1558,43 @@ class TurnRunner:
+                 clear_session(session_key)
+             reset_current_session_key(token)
+ 
++    def _attach_stream_footer(self, result, stream_consumer) -> bool:
++        """Attach the Feishu CardKit footer before the stream's final edit."""
++        ctx = self._ctx
++        if ctx.source.platform != Platform.FEISHU or stream_consumer is None:
++            return False
++        formatter = getattr(stream_consumer.adapter, "format_stream_footer", None)
++        if not callable(formatter):
++            return False
++        try:
++            from gateway.runtime_footer import resolve_footer_config
++
++            footer_cfg = resolve_footer_config(ctx.user_config, "feishu")
++            if not footer_cfg.get("enabled"):
++                return False
++            agent = ctx.agent_holder[0]
++            compressor = getattr(agent, "context_compressor", None) if agent else None
++            footer = formatter(
++                status="出错" if result.get("failed") else "已完成",
++                elapsed_seconds=(
++                    time.monotonic()
++                    - getattr(ctx, "agent_run_started_at", time.monotonic())
++                ),
++                input_tokens=getattr(agent, "session_prompt_tokens", 0) if agent else 0,
++                output_tokens=getattr(agent, "session_completion_tokens", 0) if agent else 0,
++                cache_read_tokens=getattr(agent, "session_cache_read_tokens", 0) if agent else 0,
++                cache_write_tokens=getattr(agent, "session_cache_write_tokens", 0) if agent else 0,
++                context_tokens=getattr(compressor, "last_prompt_tokens", 0) if compressor else 0,
++                context_length=(getattr(compressor, "context_length", 0) or None) if compressor else None,
++                model=getattr(agent, "model", None) if agent else None,
++            )
++            if footer:
++                stream_consumer.set_final_metadata(feishu_stream_footer=footer)
++                return True
++        except Exception as err:
++            logger.debug("Feishu stream footer build failed: %s", err)
++        return False
++
+     def _finish_stream_consumer(self, result, agent_history, stream_consumer):
+         ctx = self._ctx
+         # Canonicalize a model-emitted computer-use screenshot path at the common result boundary so
+@@ -1459,6 +1606,9 @@ class TurnRunner:
+         ctx.result_holder[0] = result
+         if stream_consumer is None:
+             return
++        result["feishu_stream_footer_embedded"] = self._attach_stream_footer(
++            result, stream_consumer
++        )
+         # Pass final_response as the authoritative finalize payload: it includes post-stream
+         # augmentation (verifier footer, explainer) the accumulator never saw. Adopt ONLY a genuinely
+         # completed final: interrupt paths return {interrupted: True, completed: False} with a
+@@ -1658,6 +1808,8 @@ class TurnRunner:
+             "last_prompt_tokens": getattr(comp, "last_prompt_tokens", 0) if has_comp else 0,
+             "input_tokens": getattr(agent, "session_prompt_tokens", 0) if has_comp else 0,
+             "output_tokens": getattr(agent, "session_completion_tokens", 0) if has_comp else 0,
++            "cache_read_tokens": getattr(agent, "session_cache_read_tokens", 0) if has_comp else 0,
++            "cache_write_tokens": getattr(agent, "session_cache_write_tokens", 0) if has_comp else 0,
+             "model": getattr(agent, "model", None) if agent else None,
+             "context_length": (getattr(comp, "context_length", 0) or 0) if has_comp else 0,
+         }
+@@ -1674,6 +1826,7 @@ class TurnRunner:
+             "error": result.get("error"),
+             "compression_exhausted": result.get("compression_exhausted", False),
+             "compression_deferred": result.get("compression_deferred", False),
++            "feishu_stream_footer_embedded": result.get("feishu_stream_footer_embedded", False),
+             "tools": ctx.tools_holder[0] or [],
+             "history_offset": history_offset, "compacted_in_place": compacted_in_place, "session_id": effective_session_id,
+             **usage,
+diff --git a/gateway/slash_commands.py b/gateway/slash_commands.py
+index bc7aaab..0a50c81 100644
+--- a/gateway/slash_commands.py
++++ b/gateway/slash_commands.py
+@@ -1196,7 +1196,7 @@ class GatewaySlashCommandsMixin(
+         # would publish the DEFAULT profile's diagnostics from another profile's chat.
+         return await self._run_in_executor_with_context(_collect_and_upload)
+ 
+-    async def _handle_update_command(self, event: MessageEvent) -> str:
++    async def _handle_update_command(self, event: MessageEvent) -> Optional[str]:
+         """Handle /update — spawn ``hermes update`` detached (``setsid``) so it survives the gateway
+         restart it may trigger; marker files let this or the next gateway process notify the user."""
+         import json
+@@ -1239,6 +1239,10 @@ class GatewaySlashCommandsMixin(
+             exit_code_path.unlink(missing_ok=True)
+             return t("gateway.update.start_failed", error=e)
+         self._schedule_update_notification_watch()
++        # Feishu's update watcher owns one editable CardKit message from start to finish.
++        # Returning the generic acknowledgement here would create a second reply.
++        if src.platform == Platform.FEISHU:
++            return None
+         return t("gateway.update.starting")
+ 
+ 
+diff --git a/gateway/stream_consumer.py b/gateway/stream_consumer.py
+index 24befeb..125c7eb 100644
+--- a/gateway/stream_consumer.py
++++ b/gateway/stream_consumer.py
+@@ -14,6 +14,7 @@ import contextlib
+ import inspect
+ import logging
+ import queue
++import re
+ import secrets
+ import threading
+ import time
+@@ -37,6 +38,13 @@ from gateway.stream_consumer_think import StreamThinkFilterMixin
+ 
+ logger = logging.getLogger("gateway.stream_consumer")
+ 
++_INLINE_PROGRESS_FENCE_LINE_RE = re.compile(r"^```[^\n`]*\s*$", re.MULTILINE)
++_INLINE_PROGRESS_MAX_LINES = 6
++_INLINE_PROGRESS_MAX_CHARS = 1200
++_INLINE_PROGRESS_EVENT_MAX_CHARS = 220
++_INLINE_PROGRESS_TITLE = "最近进度"
++_INLINE_ANSWER_TITLE = "回复"
++
+ # Queue sentinels (see _drain_queue()).  Bare: _DONE, _NEW_SEGMENT (finalize, start a
+ # fresh message), _REOPEN_SEED (EAGER native re-seed after a clarify answer — WeCom
+ # typing is driven by the seed frame; lazy re-seed measured 48s of dead air).  Tuples:
+@@ -134,6 +142,12 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
+         # Only platforms needing an explicit finalize call (DingTalk AI Cards) force a
+         # redundant final edit; ``is True`` keeps MagicMock adapters out.
+         self._adapter_requires_finalize = getattr(adapter, "REQUIRES_EDIT_FINALIZE", False) is True
++        # Feishu CardKit keeps temporary tool/thinking progress and the streamed answer in one
++        # editable card.  The class-level opt-in avoids changing DingTalk and ordinary edit
++        # transports that also require an explicit finalize call.
++        self._inline_progress = (
++            getattr(type(adapter), "STREAM_PROGRESS_IN_CONTENT", False) is True
++        )
+         # Telegram bounds edit retries at 5s; a fallback must not wait longer.
+         self._max_fallback_flood_retry_seconds = 5.0
+ 
+@@ -194,6 +208,7 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
+         # Tool-progress overlay (native only): shown in the bubble until text arrives.
+         self._tool_progress_lines: list[str] = []
+         self._tool_progress_active: bool = False
++        self._inline_progress_lines: list[str] = []
+         self._clear_turn_final_flags()
+ 
+     def _clear_turn_final_flags(self) -> None:
+@@ -230,13 +245,62 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
+ 
+     @property
+     def accepts_tool_progress(self) -> bool:
+-        """True only when native streaming is active (gates in-stream tool progress)."""
+-        return self._use_native_streaming
++        """Whether tool progress belongs inside this stream instead of a separate bubble."""
++        return self._use_native_streaming or self._inline_progress
++
++    @property
++    def keeps_progress_in_stream(self) -> bool:
++        """True for editable streams whose progress is temporary card content."""
++        return self._inline_progress
+ 
+-    def on_tool_progress(self, line: str) -> None:
+-        """Thread-safe: overlay a tool-progress line in the native bubble until the next delta."""
++    def on_tool_progress(self, line: str, *, replace_last: bool = False) -> None:
++        """Thread-safe: add a temporary tool/status line to the active stream."""
+         if line:
+-            self._queue.put((_TOOL_PROGRESS, line))
++            self._queue.put((_TOOL_PROGRESS, line, bool(replace_last)))
++
++    def set_final_metadata(self, **metadata: Any) -> None:
++        """Attach metadata that only becomes available after the model run, such as usage."""
++        clean = {key: value for key, value in metadata.items() if value is not None}
++        if clean:
++            if self.metadata is None:
++                self.metadata = {}
++            self.metadata.update(clean)
++
++    @staticmethod
++    def _sanitize_inline_progress(line: str) -> str:
++        text = str(line or "").replace("\r\n", "\n").strip()
++        if "```" in text:
++            text = _INLINE_PROGRESS_FENCE_LINE_RE.sub("", text)
++            text = re.sub(r"\n{3,}", "\n\n", text)
++        text = re.sub(r"[ \t]*\n+[ \t]*", " · ", text)
++        text = re.sub(r"\s{2,}", " ", text).strip()
++        if len(text) > _INLINE_PROGRESS_EVENT_MAX_CHARS:
++            text = text[: _INLINE_PROGRESS_EVENT_MAX_CHARS - 1].rstrip() + "…"
++        return text
++
++    def _update_inline_progress(self, line: str, *, replace_last: bool = False) -> None:
++        text = self._sanitize_inline_progress(line)
++        if not text:
++            return
++        if replace_last and self._inline_progress_lines:
++            self._inline_progress_lines[-1] = text
++        else:
++            self._inline_progress_lines.append(text)
++        self._inline_progress_lines = self._inline_progress_lines[-_INLINE_PROGRESS_MAX_LINES:]
++        while (
++            len(self._inline_progress_lines) > 1
++            and sum(len(item) for item in self._inline_progress_lines) > _INLINE_PROGRESS_MAX_CHARS
++        ):
++            self._inline_progress_lines.pop(0)
++
++    def _compose_inline_content(self) -> str:
++        progress = "\n".join(f"• {line}" for line in self._inline_progress_lines)
++        if self._accumulated.strip():
++            return (
++                f"思考中\n\n{_INLINE_PROGRESS_TITLE}\n{progress}\n\n"
++                f"{_INLINE_ANSWER_TITLE}\n{self._accumulated.lstrip()}"
++            )
++        return f"思考中\n\n{_INLINE_PROGRESS_TITLE}\n{progress}" if progress else "思考中"
+ 
+     def _compose_frame_content(self) -> str:
+         """Native frame content: text, with any tool-progress lines below a rule."""
+@@ -277,7 +341,7 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
+         """Append to the live buffer and the split-stable stream ledger."""
+         if not text:
+             return
+-        if self._tool_progress_lines:  # real text overwrites the overlay
++        if self._tool_progress_lines and not self._inline_progress:  # native overlay is temporary
+             self._tool_progress_lines.clear()
+             self._tool_progress_active = False
+         self._accumulated += text
+@@ -551,7 +615,9 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
+                         return
+ 
+                 if self._should_edit(tick) and (
+-                    self._accumulated or (self._use_native_streaming and self._tool_progress_active)
++                    self._accumulated
++                    or (self._use_native_streaming and self._tool_progress_active)
++                    or (self._inline_progress and self._inline_progress_lines)
+                 ):
+                     # Overflow split.  Native streaming bypasses this: the adapter
+                     # truncates against the stream protocol's own limit.
+@@ -643,6 +709,10 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
+                 if self._use_native_streaming:
+                     self._tool_progress_lines.append(item[1])
+                     self._tool_progress_active = True
++                elif self._inline_progress:
++                    self._update_inline_progress(
++                        item[1], replace_last=bool(item[2]) if len(item) > 2 else False
++                    )
+             elif kind is _APPROVAL_BOUNDARY:
+                 tick.approval_boundary = (item[1], item[2])
+                 return tick
+@@ -702,6 +772,12 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
+         if self._use_native_streaming:
+             # No platform edit-rate limit: push every delta immediately.
+             should_edit = bool(self._accumulated) or self._tool_progress_active
++        elif self._inline_progress and self._inline_progress_lines:
++            elapsed = time.monotonic() - self._last_edit_time
++            should_edit = bool(
++                len(self._accumulated) >= self.cfg.buffer_threshold
++                or elapsed >= self._current_edit_interval
++            )
+         else:
+             elapsed = time.monotonic() - self._last_edit_time
+             # buffer_threshold is a codepoint debounce heuristic, not a
+@@ -765,10 +841,16 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
+         return self._len_fn(self._accumulated) > self._safe_limit
+ 
+     def _first_send_overflows(self) -> bool:
+-        return self._message_id is None and self._overflows()
++        return (
++            self._message_id is None
++            and not (self._inline_progress and self._inline_progress_lines)
++            and self._overflows()
++        )
+ 
+     async def _seal_overflow_heads(self) -> None:
+         """Existing message overflowing: seal it with the head, start a new message for the rest."""
++        if self._inline_progress and self._inline_progress_lines:
++            return
+         while self._overflows() and self._message_id is not None and self._edit_supported:
+             cp_budget = _custom_unit_to_cp(self._accumulated, self._safe_limit, self._len_fn)
+             split_at = self._accumulated.rfind("\n", 0, cp_budget)
+@@ -794,6 +876,8 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
+                 display_text = self._compose_frame_content()
+                 if display_text and self.cfg.cursor:
+                     display_text += self.cfg.cursor
++            elif self._inline_progress:
++                display_text = self._compose_inline_content()
+             else:
+                 display_text += self.cfg.cursor
+ 
+diff --git a/hermes_cli/gateway.py b/hermes_cli/gateway.py
+index ab81b1a..fc782ad 100644
+--- a/hermes_cli/gateway.py
++++ b/hermes_cli/gateway.py
+@@ -32,7 +32,7 @@ if os.name == "posix":
+ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
+ 
+ from gateway.config import coerce_systemd_watchdog_seconds, load_gateway_config
+-from gateway.status import terminate_pid
++from gateway.status import looks_like_gateway_command_line, terminate_pid
+ from gateway.restart import (
+     DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
+     EXTERNAL_GATEWAY_SUPERVISOR_ENV,
+@@ -117,6 +117,39 @@ class WindowsGatewayService:
+     gateway_create_time: float = 0.0
+ 
+ 
++def _managed_gateway_descendant_pids(service_pids: set[int], psutil_module=None) -> set[int]:
++    """Return gateway children hidden behind service wrapper processes.
++
++    launchd may report the PID of ``stderr_timestamp`` while the actual gateway is
++    its child.  Only include descendants whose command line is a real
++    ``gateway run`` invocation so MCP and other helper children remain outside
++    the service-owned gateway set.
++    """
++    if not service_pids:
++        return set()
++    if psutil_module is None:
++        try:
++            import psutil as psutil_module  # type: ignore
++        except ImportError:
++            return set()
++
++    gateway_pids: set[int] = set()
++    for service_pid in service_pids:
++        try:
++            descendants = psutil_module.Process(service_pid).children(recursive=True)
++        except Exception:
++            continue
++        for process in descendants:
++            try:
++                pid = int(process.pid)
++                command = shlex.join([str(part) for part in process.cmdline()])
++            except Exception:
++                continue
++            if pid > 0 and looks_like_gateway_command_line(command):
++                gateway_pids.add(pid)
++    return gateway_pids
++
++
+ def _get_service_pids(all_profiles: bool = False) -> set:
+     """PIDs managed by systemd/launchd gateway services (excluded from stale-process sweeps).
+ 
+@@ -204,6 +237,7 @@ def _get_service_pids(all_profiles: bool = False) -> set:
+             except (FileNotFoundError, subprocess.TimeoutExpired):
+                 pass
+ 
++    pids.update(_managed_gateway_descendant_pids(pids))
+     return pids
+ 
+ 
+diff --git a/hermes_cli/oneshot.py b/hermes_cli/oneshot.py
+index 59afaa5..3851611 100644
+--- a/hermes_cli/oneshot.py
++++ b/hermes_cli/oneshot.py
+@@ -12,6 +12,7 @@ import json
+ import logging
+ import os
+ import sys
++import uuid
+ from contextlib import redirect_stderr, redirect_stdout
+ from dataclasses import dataclass
+ from pathlib import Path
+@@ -355,6 +356,11 @@ def _run_agent(
+     from hermes_cli.tools_config import _get_platform_tools
+     from run_agent import AIAgent
+ 
++    from agent.runtime_cwd import set_session_cwd
++
++    runtime_cwd_token = set_session_cwd(os.getcwd())
++    oneshot_task_id: Optional[str] = None
++    local_cwd_override_registered = False
+     cfg = load_config()
+     choice = _resolve_model_and_provider(cfg, model, provider)
+     runtime = resolve_runtime_provider(
+@@ -410,9 +416,28 @@ def _run_agent(
+         agent.stream_delta_callback = None
+         agent.tool_gen_callback = None
+ 
+-        result = agent.run_conversation(prompt)
++        oneshot_task_id = str(
++            getattr(agent, "session_id", "") or f"oneshot-{uuid.uuid4().hex}"
++        )
++        if str(cfg.get("terminal", {}).get("backend", "local")).strip().lower() == "local":
++            from tools.terminal_tool import register_task_env_overrides
++
++            register_task_env_overrides(oneshot_task_id, {"cwd": os.getcwd()})
++            local_cwd_override_registered = True
++
++        result = agent.run_conversation(prompt, task_id=oneshot_task_id)
+         return (result.get("final_response") or "", result)
+     finally:
++        if local_cwd_override_registered and oneshot_task_id:
++            from tools.terminal_tool import clear_task_env_overrides
++
++            _quietly(
++                "task cwd cleanup",
++                lambda: clear_task_env_overrides(oneshot_task_id),
++            )
++        from agent.runtime_cwd import reset_session_cwd
++
++        reset_session_cwd(runtime_cwd_token)
+         _close_agent(agent, session_db)
+ 
+ 
+diff --git a/hermes_cli/update_cmd.py b/hermes_cli/update_cmd.py
+index 14068d1..e32545e 100644
+--- a/hermes_cli/update_cmd.py
++++ b/hermes_cli/update_cmd.py
+@@ -16,6 +16,9 @@ import time as _time
+ from dataclasses import dataclass
+ from pathlib import Path
+ 
++from hermes_cli.companion_cli_updates import (
++    maybe_update_companion_clis as _maybe_update_companion_clis,
++)
+ from hermes_cli.config import get_hermes_home  # noqa: F401  (re-exported; patched via update_cmd)
+ from hermes_cli.update_cmd_common import _best_effort
+ from hermes_constants import get_default_hermes_root, venv_python_path
+@@ -1162,6 +1165,7 @@ def _finish_already_up_to_date(
+             _write_gateway_update_exit_code(False)
+         _finalize_receipt("partial", 'Update receipt finalize (current checkout) failed: %s')
+         sys.exit(1)
++    _maybe_update_companion_clis(gateway_mode)
+ 
+ 
+ def _apply_pulled_update(
+@@ -1208,6 +1212,8 @@ def _apply_pulled_update(
+         node_failures=node_failures, desktop_build_ok=desktop_build_ok,
+         pre_update_version=opts.pre_update_version)
+ 
++    _maybe_update_companion_clis(gateway_mode)
++
+     # Exit code *before* the restart: under --gateway this process lives in the gateway's
+     # systemd cgroup and the systemctl-restart fallback SIGKILLs it (KillMode=mixed), so
+     # the marker would never land and the new gateway's watcher would time out spuriously.
+diff --git a/hermes_cli/update_cmd_fleet.py b/hermes_cli/update_cmd_fleet.py
+index e9f1c92..e6c3b50 100644
+--- a/hermes_cli/update_cmd_fleet.py
++++ b/hermes_cli/update_cmd_fleet.py
+@@ -220,8 +220,8 @@ def _run_pending_fleet_restart() -> bool:
+     # user migrates.
+     try:
+         from hermes_cli.gateway import (
+-            find_gateway_pids, is_macos, is_windows, kill_gateway_processes, supports_systemd_services,
+-            _wait_for_gateway_exit,
++            find_gateway_pids, is_macos, is_windows, supports_systemd_services,
++            _wait_for_pid_exit,
+         )
+     except Exception as exc:
+         _warn_gateway_restart_phase_aborted(exc, None)
+@@ -233,6 +233,15 @@ def _run_pending_fleet_restart() -> bool:
+         logger.debug("Pending fleet restart: gateway probe failed: %s", exc)
+         pids = None
+ 
++    initial_pid_start_times: dict[int, float] = {}
++    if pids:
++        with suppress(Exception):
++            from gateway.status import get_process_start_time
++            for pid in pids:
++                started_at = get_process_start_time(pid)
++                if started_at is not None:
++                    initial_pid_start_times[pid] = started_at
++
+     if pids == []:
+         print("  ✓ No running gateways — nothing to restart.")
+         return True
+@@ -261,13 +270,30 @@ def _run_pending_fleet_restart() -> bool:
+                 logger.debug("Pending fleet restart: Windows failed: %s", exc)
+                 failed.append("windows-gateway")
+         try:
+-            leftover = list(find_gateway_pids(all_profiles=True))
++            running_after_restart = set(find_gateway_pids(all_profiles=True))
+         except Exception:
+-            leftover = list(pids or [])
++            running_after_restart = set(pids or [])
++        # Supervisor restarts replace the old process with a fresh PID. Only stop
++        # pre-update PIDs that survived; killing every PID here also kills the
++        # newly relaunched gateway and triggers launchd/systemd restart backoff.
++        leftover = sorted(set(pids or []).intersection(running_after_restart))
+         if leftover:
+-            with _best_effort('Pending fleet restart: PID stop failed: %s'):
+-                kill_gateway_processes(all_profiles=True)
+-                _wait_for_gateway_exit(timeout=5.0, force_after=None)
++            from gateway.status import terminate_pid
++            for pid in leftover:
++                with _best_effort('Pending fleet restart: PID stop failed: %s'):
++                    kwargs = {}
++                    if pid in initial_pid_start_times:
++                        kwargs["expected_start_time"] = initial_pid_start_times[pid]
++                    terminate_pid(pid, **kwargs)
++
++            deadline = _time.monotonic() + 5.0
++            survivors = []
++            for pid in leftover:
++                remaining = max(0.0, deadline - _time.monotonic())
++                if not _wait_for_pid_exit(pid, remaining):
++                    survivors.append(pid)
++            if survivors:
++                failed.extend(f"gateway-pid-{pid}" for pid in survivors)
+         if failed:
+             _warn_incomplete_gateway_fleet_restart(failed)
+             return False
+diff --git a/hermes_cli/update_inventory.py b/hermes_cli/update_inventory.py
+index 912d66d..adb8f9c 100644
+--- a/hermes_cli/update_inventory.py
++++ b/hermes_cli/update_inventory.py
+@@ -65,6 +65,14 @@ def _detect_supervisor_for_pid(pid: int, service_pids: set, windows_service_pids
+     return "service"
+ 
+ 
++def _resolve_gateway_supervisor(pid: int, declared: Any, classifier: Callable[[int], str]) -> str:
++    """Resolve generic socket ownership to the platform-specific supervisor."""
++    value = str(declared or "").strip()
++    if value in {"", "external", "external-supervisor"}:
++        return classifier(pid)
++    return value
++
++
+ # THE restart policy table: restart execution consumes these ids via match_runtime_outcomes / the
+ # update's restart phase, and the receipt records per-runtime outcomes against them. Display
+ # strings are derived by describe_restart_mechanism — never the other way around.
+@@ -182,8 +190,7 @@ def _collect_gateway_runtimes(plan: UpdatePlan, profile_homes: list, seen: set[i
+                 if pid in seen:
+                     continue  # one multiplex gateway answers identify for several homes — one record per process
+                 seen.add(pid)
+-                declared = record.get("supervisor")
+-                sup = str(declared) if declared else supervisor(pid)
++                sup = _resolve_gateway_supervisor(pid, record.get("supervisor"), supervisor)
+             else:
+                 record = read_runtime_status(home / "gateway_state.json") or {}
+                 try:
+diff --git a/plugins/platforms/feishu/adapter.py b/plugins/platforms/feishu/adapter.py
+index 7614366..39fcfdb 100644
+--- a/plugins/platforms/feishu/adapter.py
++++ b/plugins/platforms/feishu/adapter.py
+@@ -60,6 +60,11 @@ except ImportError:
+ # (_load_lark_oapi binds every name in _LARK_SDK_IMPORTS plus ``lark`` and ``FeishuWSClient``).
+ _LARK_SDK_IMPORTS = (
+     ("lark_oapi.api.application.v6", ("GetApplicationRequest",)),
++    ("lark_oapi.api.cardkit.v1", (
++        "Card", "ContentCardElementRequest", "ContentCardElementRequestBody",
++        "CreateCardRequest", "CreateCardRequestBody", "SettingsCardRequest",
++        "SettingsCardRequestBody", "UpdateCardRequest", "UpdateCardRequestBody",
++    )),
+     ("lark_oapi.api.im.v1", (
+         "CreateFileRequest", "CreateFileRequestBody", "CreateImageRequest", "CreateImageRequestBody",
+         "CreateMessageRequest", "CreateMessageRequestBody", "GetChatRequest", "GetMessageRequest",
+@@ -95,6 +100,12 @@ from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret
+ 
+ logger = logging.getLogger(__name__)
+ 
++
++def _safe_token(value: object) -> str:
++    """Return a short, non-secret identifier for operational logs."""
++    token = str(value or "")
++    return token if len(token) <= 12 else f"{token[:8]}...{token[-4:]}"
++
+ # --- Regex patterns ---
+ _MARKDOWN_HINT_RE = re.compile(
+     # Pipe table: any header line + separator line both starting with '|'.
+@@ -144,6 +155,13 @@ _DEFAULT_DEDUP_CACHE_SIZE = 2048
+ _DEFAULT_WEBHOOK_HOST = "127.0.0.1"
+ _DEFAULT_WEBHOOK_PORT = 8765
+ _DEFAULT_WEBHOOK_PATH = "/feishu/webhook"
++_FEISHU_STREAM_CARD_ELEMENT_ID = "streaming_content"
++_FEISHU_STREAM_CARD_PROGRESS_ELEMENT_ID = "streaming_progress"
++_FEISHU_STREAM_CARD_PROGRESS_TITLE = "最近进度"
++_FEISHU_STREAM_CARD_ANSWER_TITLE = "回复"
++_FEISHU_STREAM_CARD_EMPTY_MARKDOWN = "\u200b"
++_FEISHU_STREAM_CARD_TRACK_SIZE = 512
++_FEISHU_STREAM_CARD_CODE_FENCE_RE = re.compile(r"^```[^\n`]*\s*$", re.MULTILINE)
+ # --- TTL, rate-limit and webhook security constants ---
+ _FEISHU_DEDUP_TTL_SECONDS = 24 * 60 * 60          # 24 hours — matches openclaw
+ _FEISHU_SENDER_NAME_TTL_SECONDS = 10 * 60          # 10 minutes sender-name cache
+@@ -175,14 +193,18 @@ async def _read_limited_feishu_webhook_body(request: Any, max_bytes: int) -> byt
+     return body
+ 
+ 
++_FEISHU_BOT_MSG_TRACK_SIZE = 512
+ _FEISHU_REPLY_FALLBACK_CODES = frozenset({230011, 231003})  # reply target withdrawn/missing → create fallback
+ 
+-# Feishu reactions render as prominent badges, unlike Discord/Telegram's
+-# small footer emoji — a success badge on every message would add noise, so
+-# we only mark start (Typing) and failure (CrossMark); the reply itself is
+-# the success signal.
++# Reactions are the durable task-state signal: Typing stays while work is
++# active, then changes to one terminal state only after the turn really ends.
++_FEISHU_REACTION_IN_PROGRESS_ENV = "FEISHU_REACTION_IN_PROGRESS"
++_FEISHU_REACTION_SUCCESS_ENV = "FEISHU_REACTION_SUCCESS"
++_FEISHU_REACTION_CANCELLED_ENV = "FEISHU_REACTION_CANCELLED"
+ _FEISHU_REACTION_IN_PROGRESS = "Typing"
++_FEISHU_REACTION_SUCCESS = "DONE"
+ _FEISHU_REACTION_FAILURE = "CrossMark"
++_FEISHU_REACTION_CANCELLED = "BOMB"
+ # Bound on the (message_id → reaction_id) handle cache. Happy-path entries
+ # drain on completion; the cap is a safeguard against unbounded growth from
+ # delete-failures, not a capacity plan.
+@@ -222,6 +244,7 @@ _RICH_BLOCK_TAGS = {
+ _SKIP_TEXT_KEYS = {
+     "tag", "type", "msg_type", "message_type", "chat_id", "open_chat_id", "share_chat_id", "file_key", "image_key",
+     "user_id", "open_id", "union_id", "url", "href", "link", "token", "template", "locale",
++    "element_id", "margin", "text_align", "text_size",
+ }
+ 
+ 
+@@ -1196,6 +1219,8 @@ class FeishuAdapter(BasePlatformAdapter):
+ 
+     supports_code_blocks = True  # Feishu renders fenced code blocks
+     splits_long_messages = True  # send() chunks via truncate_message(MAX_MESSAGE_LENGTH)
++    REQUIRES_EDIT_FINALIZE = True
++    STREAM_PROGRESS_IN_CONTENT = True
+ 
+     MAX_MESSAGE_LENGTH = 8000
+     CHAT_LOCK_MAX_SIZE: int = 1000  # distinct chat IDs kept in _chat_locks before LRU eviction
+@@ -1236,6 +1261,8 @@ class FeishuAdapter(BasePlatformAdapter):
+         self._chat_locks: "collections.OrderedDict[str, asyncio.Lock]" = collections.OrderedDict()  # chat_id → lock (per-chat serial processing, LRU-bounded)
+         self._chat_info_cache: Dict[str, Dict[str, Any]] = {}
+         self._message_text_cache: "OrderedDict[str, Optional[str]]" = OrderedDict()
++        self._outbound_message_types: "OrderedDict[str, str]" = OrderedDict()
++        self._stream_card_states: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+         self._app_lock_identity: Optional[str] = None
+         self._text_batch_state = FeishuBatchState()
+         self._pending_text_batches = self._text_batch_state.events
+@@ -1553,6 +1580,346 @@ class FeishuAdapter(BasePlatformAdapter):
+             self._webhook_site = None
+ 
+     # --- Outbound — send / edit / send_image / send_voice / … ---
++    def _remember_outbound_message_type(self, message_id: Any, msg_type: str) -> None:
++        message_id = str(message_id or "").strip()
++        msg_type = str(msg_type or "").strip()
++        if not message_id or not msg_type:
++            return
++        self._outbound_message_types[message_id] = msg_type
++        self._outbound_message_types.move_to_end(message_id)
++        while len(self._outbound_message_types) > _FEISHU_BOT_MSG_TRACK_SIZE:
++            self._outbound_message_types.popitem(last=False)
++
++    def _remember_outbound_message_text(
++        self, chat_id: str, message_id: Any, content: str
++    ) -> None:
++        """Keep bot text resolvable when Feishu hides CardKit card bodies."""
++        message_id = str(message_id or "").strip()
++        content = str(content or "").strip()
++        if not chat_id or not message_id or not content:
++            return
++        self._message_text_cache[message_id] = content
++        self._message_text_cache.move_to_end(message_id)
++        while len(self._message_text_cache) > _FEISHU_MESSAGE_TEXT_CACHE_SIZE:
++            self._message_text_cache.popitem(last=False)
++        from gateway import rich_sent_store
++
++        rich_sent_store.record(chat_id, message_id, content)
++
++    def _remember_stream_card_state(
++        self, message_id: str, *, card_id: str, content: str = ""
++    ) -> None:
++        message_id = str(message_id or "").strip()
++        card_id = str(card_id or "").strip()
++        if not message_id or not card_id:
++            return
++        progress, answer = self._stream_card_live_sections(content)
++        self._stream_card_states[message_id] = {
++            "card_id": card_id,
++            "sequence": 0,
++            "last_progress": progress,
++            "last_answer": answer,
++        }
++        self._stream_card_states.move_to_end(message_id)
++        while len(self._stream_card_states) > _FEISHU_STREAM_CARD_TRACK_SIZE:
++            self._stream_card_states.popitem(last=False)
++
++    @staticmethod
++    def _cardkit_available() -> bool:
++        return all(
++            globals().get(name) is not None
++            for name in (
++                "Card", "ContentCardElementRequest", "ContentCardElementRequestBody",
++                "CreateCardRequest", "CreateCardRequestBody", "SettingsCardRequest",
++                "SettingsCardRequestBody", "UpdateCardRequest", "UpdateCardRequestBody",
++            )
++        )
++
++    @staticmethod
++    def _stream_footer_from_metadata(metadata: Optional[Dict[str, Any]]) -> str:
++        if not isinstance(metadata, dict):
++            return ""
++        footer = metadata.get("feishu_stream_footer") or metadata.get("stream_footer")
++        return str(footer or "").replace("\n", " ").strip()
++
++    @staticmethod
++    def _sanitize_stream_card_content(content: str) -> str:
++        text = str(content or "").replace("\r\n", "\n")
++        if "```" in text:
++            text = _FEISHU_STREAM_CARD_CODE_FENCE_RE.sub("", text)
++            text = re.sub(r"\n{3,}", "\n\n", text)
++        return text.strip()
++
++    @staticmethod
++    def _stream_card_live_content(content: str) -> str:
++        text = FeishuAdapter._sanitize_stream_card_content(content)
++        lines = text.splitlines()
++        if lines and lines[0].strip() == "思考中":
++            lines = lines[1:]
++            while lines and not lines[0].strip():
++                lines = lines[1:]
++        return "\n".join(lines).strip()
++
++    @staticmethod
++    def _stream_card_live_sections(content: str) -> tuple[str, str]:
++        text = FeishuAdapter._stream_card_live_content(content)
++        if not text:
++            return "", ""
++        lines = text.splitlines()
++        answer_index = next(
++            (index for index, line in enumerate(lines)
++             if line.strip() == _FEISHU_STREAM_CARD_ANSWER_TITLE),
++            None,
++        )
++        if answer_index is not None:
++            return (
++                "\n".join(lines[:answer_index]).strip(),
++                "\n".join(lines[answer_index + 1:]).strip(),
++            )
++        first_line = lines[0].strip()
++        if first_line == _FEISHU_STREAM_CARD_PROGRESS_TITLE or first_line.startswith("• "):
++            return text, ""
++        return "", text
++
++    @staticmethod
++    def _stream_card_element_content(content: str) -> str:
++        return str(content or "") or _FEISHU_STREAM_CARD_EMPTY_MARKDOWN
++
++    @staticmethod
++    def _stream_card_final_content(content: str) -> str:
++        text = FeishuAdapter._sanitize_stream_card_content(content)
++        if not text:
++            return ""
++        lines = text.splitlines()
++        if lines and lines[0].strip() == "思考中":
++            marker = f"\n{_FEISHU_STREAM_CARD_ANSWER_TITLE}\n"
++            if marker in text:
++                return text.split(marker, 1)[1].strip()
++            parts = [part.strip() for part in text.split("\n\n") if part.strip()]
++            if len(parts) >= 2:
++                return parts[-1]
++        return text
++
++    @staticmethod
++    def _build_stream_card(
++        content: str = "", *, streaming: bool = True, footer: str = ""
++    ) -> Dict[str, Any]:
++        content = FeishuAdapter._sanitize_stream_card_content(content)
++        elements: list[Dict[str, Any]] = []
++        if streaming:
++            progress, answer = FeishuAdapter._stream_card_live_sections(content)
++            elements.extend([
++                {
++                    "tag": "markdown", "content": "**思考中**",
++                    "text_align": "left", "text_size": "normal_v2",
++                    "margin": "0px 0px 6px 0px",
++                },
++                {
++                    "tag": "markdown",
++                    "content": FeishuAdapter._stream_card_element_content(progress),
++                    "text_align": "left", "text_size": "notation",
++                    "margin": "0px 0px 8px 0px",
++                    "element_id": _FEISHU_STREAM_CARD_PROGRESS_ELEMENT_ID,
++                },
++                {
++                    "tag": "markdown",
++                    "content": FeishuAdapter._stream_card_element_content(answer),
++                    "text_align": "left", "text_size": "normal_v2",
++                    "margin": "0px 0px 0px 0px",
++                    "element_id": _FEISHU_STREAM_CARD_ELEMENT_ID,
++                },
++            ])
++        else:
++            elements.append({
++                "tag": "markdown",
++                "content": FeishuAdapter._stream_card_final_content(content),
++                "text_align": "left", "text_size": "normal_v2",
++                "margin": "0px 0px 0px 0px",
++                "element_id": _FEISHU_STREAM_CARD_ELEMENT_ID,
++            })
++        footer = str(footer or "").strip()
++        if footer:
++            elements.append({
++                "tag": "markdown", "content": footer,
++                "i18n_content": {"zh_cn": footer, "en_us": footer},
++                "text_size": "notation", "margin": "8px 0px 0px 0px",
++            })
++        summary = "Hermes"
++        return {
++            "schema": "2.0",
++            "config": {
++                "streaming_mode": streaming,
++                "locales": ["zh_cn", "en_us"],
++                "summary": {
++                    "content": summary,
++                    "i18n_content": {"zh_cn": summary, "en_us": summary},
++                },
++            },
++            "body": {"elements": elements},
++        }
++
++    @staticmethod
++    def _should_use_cardkit_stream(
++        metadata: Optional[Dict[str, Any]], content: str
++    ) -> bool:
++        if os.getenv("HERMES_FEISHU_CARDKIT_STREAMING", "true").strip().lower() in {
++            "0", "false", "off", "no",
++        }:
++            return False
++        if not metadata or not metadata.get("expect_edits"):
++            return False
++        text = str(content or "").strip()
++        return bool(text and "MEDIA:" not in text and "[[audio_as_voice]]" not in text)
++
++    async def _create_cardkit_card(self, content: str) -> SendResult:
++        if not self._client or not self._cardkit_available():
++            return SendResult(success=False, error="CardKit unavailable")
++        body = CreateCardRequestBody.builder().type("card_json").data(
++            json.dumps(self._build_stream_card(content, streaming=True), ensure_ascii=False)
++        ).build()
++        request = CreateCardRequest.builder().request_body(body).build()
++        try:
++            response = await self._run_blocking(self._client.cardkit.v1.card.create, request)
++        except Exception as exc:
++            logger.warning("[Feishu] CardKit card.create failed: %s", exc)
++            return SendResult(success=False, error=str(exc))
++        if not self._response_succeeded(response):
++            return self._response_error_result(response, default_message="card.create failed")
++        card_id = self._extract_response_field(response, "card_id")
++        if not card_id:
++            return SendResult(success=False, error="card.create missing card_id", raw_response=response)
++        logger.info("[Feishu] CardKit stream card created card_id=%s", _safe_token(card_id))
++        return SendResult(success=True, message_id=str(card_id), raw_response=response)
++
++    async def _send_cardkit_stream_message(
++        self, *, chat_id: str, content: str, reply_to: Optional[str],
++        metadata: Optional[Dict[str, Any]],
++    ) -> SendResult:
++        card_result = await self._create_cardkit_card(content)
++        if not card_result.success or not card_result.message_id:
++            return card_result
++        card_id = str(card_result.message_id)
++        payload = json.dumps({"type": "card", "data": {"card_id": card_id}}, ensure_ascii=False)
++        try:
++            response = await self._feishu_send_with_retry(
++                chat_id=chat_id, msg_type="interactive", payload=payload,
++                reply_to=reply_to, metadata=metadata,
++            )
++        except Exception as exc:
++            logger.warning("[Feishu] CardKit card send failed: %s", exc)
++            return SendResult(success=False, error=str(exc))
++        result = self._finalize_send_result(response, "card send failed")
++        if result.success and result.message_id:
++            self._remember_outbound_message_type(result.message_id, "interactive")
++            self._remember_stream_card_state(
++                str(result.message_id), card_id=card_id, content=content
++            )
++            self._remember_outbound_message_text(chat_id, result.message_id, content)
++        return result
++
++    async def _update_cardkit_element_content(
++        self, *, state: Dict[str, Any], card_id: str,
++        element_id: str, content: str,
++    ) -> SendResult:
++        state["sequence"] = int(state.get("sequence") or 0) + 1
++        body = ContentCardElementRequestBody.builder().content(
++            self._stream_card_element_content(content)
++        ).sequence(int(state["sequence"])).build()
++        request = ContentCardElementRequest.builder().card_id(card_id).element_id(
++            element_id
++        ).request_body(body).build()
++        try:
++            response = await self._run_blocking(
++                self._client.cardkit.v1.card_element.content, request
++            )
++        except Exception as exc:
++            logger.warning("[Feishu] CardKit cardElement.content failed: %s", exc)
++            return SendResult(success=False, error=str(exc))
++        if not self._response_succeeded(response):
++            return self._response_error_result(
++                response, default_message="cardElement.content failed"
++            )
++        return SendResult(success=True, raw_response=response)
++
++    async def _stream_cardkit_content(
++        self, *, state: Dict[str, Any], content: str
++    ) -> SendResult:
++        card_id = str(state.get("card_id") or "")
++        if not card_id:
++            return SendResult(success=False, error="missing CardKit card_id")
++        progress, answer = self._stream_card_live_sections(content)
++        for key, element_id, value in (
++            ("last_progress", _FEISHU_STREAM_CARD_PROGRESS_ELEMENT_ID, progress),
++            ("last_answer", _FEISHU_STREAM_CARD_ELEMENT_ID, answer),
++        ):
++            previous = state.get(key, "")
++            previous = previous if isinstance(previous, str) else str(previous or "")
++            if value == previous:
++                continue
++            result = await self._update_cardkit_element_content(
++                state=state, card_id=card_id, element_id=element_id, content=value
++            )
++            if not result.success:
++                return result
++            state[key] = value
++        return SendResult(success=True)
++
++    async def _finalize_cardkit_stream(
++        self, *, state: Dict[str, Any], content: str,
++        metadata: Optional[Dict[str, Any]] = None,
++    ) -> SendResult:
++        card_id = str(state.get("card_id") or "")
++        if not card_id:
++            return SendResult(success=False, error="missing CardKit card_id")
++        state["sequence"] = int(state.get("sequence") or 0) + 1
++        card = Card.builder().type("card_json").data(json.dumps(
++            self._build_stream_card(
++                content, streaming=False,
++                footer=self._stream_footer_from_metadata(metadata),
++            ),
++            ensure_ascii=False,
++        )).build()
++        body = UpdateCardRequestBody.builder().card(card).sequence(
++            int(state["sequence"])
++        ).build()
++        request = UpdateCardRequest.builder().card_id(card_id).request_body(body).build()
++        try:
++            response = await self._run_blocking(self._client.cardkit.v1.card.update, request)
++        except Exception as exc:
++            logger.warning("[Feishu] CardKit card.update failed: %s", exc)
++            return SendResult(success=False, error=str(exc))
++        if not self._response_succeeded(response):
++            return self._response_error_result(response, default_message="card.update failed")
++
++        state["sequence"] = int(state.get("sequence") or 0) + 1
++        settings_body = SettingsCardRequestBody.builder().settings(
++            json.dumps({"streaming_mode": False}, ensure_ascii=False)
++        ).sequence(int(state["sequence"])).build()
++        settings_request = SettingsCardRequest.builder().card_id(card_id).request_body(
++            settings_body
++        ).build()
++        try:
++            settings_response = await self._run_blocking(
++                self._client.cardkit.v1.card.settings, settings_request
++            )
++        except Exception as exc:
++            logger.warning("[Feishu] CardKit card.settings failed: %s", exc)
++            return SendResult(success=False, error=str(exc))
++        if not self._response_succeeded(settings_response):
++            return self._response_error_result(
++                settings_response, default_message="card.settings failed"
++            )
++        return SendResult(success=True, raw_response=settings_response)
++
++    def _outbound_payload_for_edit(self, message_id: str, content: str) -> tuple[str, str]:
++        msg_type, payload = self._build_outbound_payload(content)
++        original_msg_type = self._outbound_message_types.get(str(message_id or ""))
++        if original_msg_type == "text" and msg_type != "text":
++            return "text", json.dumps({"text": content}, ensure_ascii=False)
++        if original_msg_type == "post" and msg_type != "post":
++            return "post", _build_markdown_post_payload(content)
++        return msg_type, payload
++
+     async def send(
+         self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None,
+     ) -> SendResult:
+@@ -1561,6 +1928,20 @@ class FeishuAdapter(BasePlatformAdapter):
+             return SendResult(success=False, error="Not connected")
+ 
+         formatted = self.format_message(content)
++        if self._should_use_cardkit_stream(metadata, formatted):
++            card_result = await self._send_cardkit_stream_message(
++                chat_id=chat_id,
++                content=formatted,
++                reply_to=reply_to,
++                metadata=metadata,
++            )
++            if card_result.success:
++                return card_result
++            logger.warning(
++                "[Feishu] CardKit streaming send failed; falling back to normal message: %s",
++                card_result.error,
++            )
++
+         chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
+         # Decide markdown-vs-text once for the whole message: a chunk of a long
+         # markdown reply may be plain prose that fails the per-chunk regex and would
+@@ -1582,6 +1963,7 @@ class FeishuAdapter(BasePlatformAdapter):
+         try:
+             for chunk in chunks:
+                 msg_type, payload = self._build_outbound_payload(chunk, prefer_post=prefer_post)
++                sent_msg_type = msg_type
+                 try:
+                     response = await self._feishu_send_with_retry(
+                         chat_id=chat_id, msg_type=msg_type, payload=payload, reply_to=reply_to, metadata=metadata,
+@@ -1591,6 +1973,7 @@ class FeishuAdapter(BasePlatformAdapter):
+                         raise
+                     logger.warning("[Feishu] Invalid post payload rejected by API; falling back to plain text")
+                     response = await _send_plain(chunk)
++                    sent_msg_type = "text"
+                 if (
+                     msg_type == "post"
+                     and not self._response_succeeded(response)
+@@ -1598,6 +1981,11 @@ class FeishuAdapter(BasePlatformAdapter):
+                 ):
+                     logger.warning("[Feishu] Post payload rejected by API response; falling back to plain text")
+                     response = await _send_plain(chunk)
++                    sent_msg_type = "text"
++                if self._response_succeeded(response):
++                    message_id = self._extract_response_field(response, "message_id")
++                    self._remember_outbound_message_type(message_id, sent_msg_type)
++                    self._remember_outbound_message_text(chat_id, message_id, chunk)
+                 last_response = response
+ 
+             return self._finalize_send_result(last_response, "send failed")
+@@ -1605,12 +1993,35 @@ class FeishuAdapter(BasePlatformAdapter):
+             logger.error("[Feishu] Send error: %s", exc, exc_info=True)
+             return SendResult(success=False, error=str(exc))
+ 
+-    async def edit_message(self, chat_id: str, message_id: str, content: str, *, finalize: bool = False) -> SendResult:
++    async def edit_message(
++        self, chat_id: str, message_id: str, content: str, *,
++        finalize: bool = False, metadata: Optional[Dict[str, Any]] = None,
++    ) -> SendResult:
+         """Edit a previously sent Feishu text/post message."""
+         if not self._client:
+             return SendResult(success=False, error="Not connected")
+ 
+         content = self.format_message(content)
++        stream_state = self._stream_card_states.get(str(message_id or ""))
++        if stream_state:
++            self._stream_card_states.move_to_end(str(message_id or ""))
++            if finalize:
++                result = await self._finalize_cardkit_stream(
++                    state=stream_state, content=content, metadata=metadata
++                )
++                if result.success:
++                    result.message_id = message_id
++                    self._remember_outbound_message_text(
++                        chat_id, message_id, self._stream_card_final_content(content)
++                    )
++                    self._stream_card_states.pop(str(message_id or ""), None)
++                return result
++            result = await self._stream_cardkit_content(
++                state=stream_state, content=content
++            )
++            if result.success:
++                result.message_id = message_id
++            return result
+ 
+         async def _update(msg_type: str, payload: str) -> SendResult:
+             body = self._build_update_message_body(msg_type=msg_type, content=payload)
+@@ -1619,7 +2030,7 @@ class FeishuAdapter(BasePlatformAdapter):
+             return self._finalize_send_result(response, "update failed")
+ 
+         try:
+-            msg_type, payload = self._build_outbound_payload(content)
++            msg_type, payload = self._outbound_payload_for_edit(message_id, content)
+             result = await _update(msg_type, payload)
+             if not result.success and msg_type == "post" and _POST_CONTENT_INVALID_RE.search(result.error or ""):
+                 logger.warning("[Feishu] Invalid post update payload rejected by API; falling back to plain text")
+@@ -1628,6 +2039,8 @@ class FeishuAdapter(BasePlatformAdapter):
+                 )
+             if result.success:
+                 result.message_id = message_id
++                self._remember_outbound_message_type(message_id, msg_type)
++                self._remember_outbound_message_text(chat_id, message_id, content)
+             return result
+         except Exception as exc:
+             logger.error("[Feishu] Failed to edit message %s: %s", message_id, exc, exc_info=True)
+@@ -2396,6 +2809,31 @@ class FeishuAdapter(BasePlatformAdapter):
+     def _reactions_enabled(self) -> bool:
+         return os.getenv("FEISHU_REACTIONS", "true").strip().lower() not in {"false", "0", "no"}
+ 
++    @staticmethod
++    def _configured_reaction_type(env_name: str, default: str) -> str:
++        value = os.getenv(env_name, default).strip()
++        if value.lower() in {"", "false", "0", "off", "no", "none", "null"}:
++            return ""
++        return value
++
++    @classmethod
++    def _processing_start_reaction_type(cls) -> str:
++        return cls._configured_reaction_type(
++            _FEISHU_REACTION_IN_PROGRESS_ENV, _FEISHU_REACTION_IN_PROGRESS
++        )
++
++    @classmethod
++    def _processing_success_reaction_type(cls) -> str:
++        return cls._configured_reaction_type(
++            _FEISHU_REACTION_SUCCESS_ENV, _FEISHU_REACTION_SUCCESS
++        )
++
++    @classmethod
++    def _processing_cancelled_reaction_type(cls) -> str:
++        return cls._configured_reaction_type(
++            _FEISHU_REACTION_CANCELLED_ENV, _FEISHU_REACTION_CANCELLED
++        )
++
+     async def _reaction_call(self, verb: str, message_id: str, ident: str, build_request: Any, api: Any) -> Any:
+         """Shared add/remove reaction wrapper: returns the response data on success, else None (logged)."""
+         try:
+@@ -2438,7 +2876,9 @@ class FeishuAdapter(BasePlatformAdapter):
+         message_id = event.message_id
+         if not self._reactions_enabled() or not message_id or message_id in self._pending_processing_reactions:
+             return
+-        reaction_id = await self._add_reaction(message_id, _FEISHU_REACTION_IN_PROGRESS)
++        reaction_id = await self._add_reaction(
++            message_id, self._processing_start_reaction_type()
++        )
+         if reaction_id:
+             cache = self._pending_processing_reactions
+             cache[message_id] = reaction_id
+@@ -2448,6 +2888,32 @@ class FeishuAdapter(BasePlatformAdapter):
+ 
+     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
+         message_id = event.message_id
++        if not self._reactions_enabled() or not message_id:
++            return
++
++        try:
++            is_update = event.get_command() == "update"
++        except Exception:
++            event_text = str(getattr(event, "text", "") or "").strip().lower()
++            is_update = event_text == "/update" or event_text.startswith("/update ")
++        if is_update:
++            home = get_hermes_home()
++            update_running = any(
++                path.exists()
++                for path in (
++                    home / ".update_pending.json",
++                    home / ".update_pending.claimed.json",
++                )
++            ) and not (home / ".update_exit_code").exists()
++            if update_running:
++                return
++
++        await self.finalize_processing_reaction(message_id, outcome)
++
++    async def finalize_processing_reaction(
++        self, message_id: str, outcome: ProcessingOutcome
++    ) -> None:
++        """Replace Typing with exactly one terminal task-state reaction."""
+         if not self._reactions_enabled() or not message_id:
+             return
+         start_reaction_id = self._pending_processing_reactions.get(message_id)
+@@ -2457,8 +2923,16 @@ class FeishuAdapter(BasePlatformAdapter):
+                 # "working" and "done/failed"); keep the handle so LRU eventually evicts it.
+                 return
+             self._pending_processing_reactions.pop(message_id, None)
+-        if outcome is ProcessingOutcome.FAILURE:
+-            await self._add_reaction(message_id, _FEISHU_REACTION_FAILURE)
++        if outcome is ProcessingOutcome.SUCCESS:
++            emoji_type = self._processing_success_reaction_type()
++        elif outcome is ProcessingOutcome.CANCELLED:
++            emoji_type = self._processing_cancelled_reaction_type()
++        elif outcome is ProcessingOutcome.FAILURE:
++            emoji_type = _FEISHU_REACTION_FAILURE
++        else:
++            emoji_type = ""
++        if emoji_type:
++            await self._add_reaction(message_id, emoji_type)
+ 
+     # --- Webhook server and security ---
+     def _record_webhook_anomaly(self, remote_ip: str, status: str) -> None:
+@@ -2508,12 +2982,16 @@ class FeishuAdapter(BasePlatformAdapter):
+             getattr(message, "parent_id", None) or getattr(message, "upper_message_id", None)
+             or getattr(message, "root_id", None) or None
+         )
+-        reply_to_text = await self._fetch_message_text(reply_to_message_id) if reply_to_message_id else None
++        chat_id = getattr(message, "chat_id", "") or ""
++        reply_to_text = (
++            await self._fetch_message_text(reply_to_message_id, chat_id)
++            if reply_to_message_id
++            else None
++        )
+         sender_primary = (
+             getattr(sender_id, "open_id", None) or getattr(sender_id, "user_id", None)
+             or getattr(sender_id, "union_id", None) or "<unknown>"
+         )
+-        chat_id = getattr(message, "chat_id", "") or ""
+         logger.info(
+             "[Feishu] Inbound %s message received: id=%s type=%s chat_id=%s sender=%s:%s text=%r media=%d",
+             "dm" if chat_type == "p2p" else "group", message_id, inbound_type.value, chat_id,
+@@ -3193,12 +3671,21 @@ class FeishuAdapter(BasePlatformAdapter):
+             logger.debug("[Feishu] Failed to fetch bot names for %s", bot_ids, exc_info=True)
+             return None
+ 
+-    async def _fetch_message_text(self, message_id: str) -> Optional[str]:
++    async def _fetch_message_text(
++        self, message_id: str, chat_id: str = ""
++    ) -> Optional[str]:
+         if not self._client or not message_id:
+             return None
+         if message_id in self._message_text_cache:
+             self._message_text_cache.move_to_end(message_id)
+             return self._message_text_cache[message_id]
++        if chat_id:
++            from gateway import rich_sent_store
++
++            persisted = rich_sent_store.lookup(chat_id, message_id)
++            if persisted:
++                self._message_text_cache[message_id] = persisted
++                return persisted
+         try:
+             request = self._build_get_message_request(message_id)
+             response = await self._run_blocking(self._client.im.v1.message.get, request)
+@@ -3592,8 +4079,11 @@ class FeishuAdapter(BasePlatformAdapter):
+     async def _send_raw_message(
+         self, *, chat_id: str, msg_type: str, payload: str, reply_to: Optional[str], metadata: Optional[Dict[str, Any]],
+     ) -> Any:
+-        thread_id = (metadata or {}).get("thread_id")
+-        effective_reply_to = reply_to or ((metadata or {}).get("reply_to_message_id") if thread_id else None)
++        flat_replies = self._flat_outbound_replies_enabled()
++        thread_id = None if flat_replies else (metadata or {}).get("thread_id")
++        effective_reply_to = None if flat_replies else reply_to
++        if not flat_replies and not effective_reply_to and thread_id:
++            effective_reply_to = (metadata or {}).get("reply_to_message_id")
+         if effective_reply_to:
+             body = self._build_reply_message_body(
+                 content=payload, msg_type=msg_type, reply_in_thread=bool(thread_id), uuid_value=str(uuid.uuid4()),
+@@ -3613,6 +4103,14 @@ class FeishuAdapter(BasePlatformAdapter):
+         request = self._build_create_message_request(receive_id_type, body)
+         return await self._run_blocking(self._client.im.v1.message.create, request)
+ 
++    def _flat_outbound_replies_enabled(self) -> bool:
++        """Send Feishu responses as fresh group messages by default."""
++        extra = getattr(getattr(self, "config", None), "extra", {}) or {}
++        for key in ("flat_replies", "flat_outbound_replies"):
++            if key in extra:
++                return _to_boolean(extra.get(key))
++        return True
++
+     @staticmethod
+     def _response_succeeded(response: Any) -> bool:
+         return bool(response and getattr(response, "success", lambda: False)())
+@@ -3807,7 +4305,11 @@ class FeishuAdapter(BasePlatformAdapter):
+ 
+     @staticmethod
+     def _build_get_message_request(message_id: str) -> Any:
+-        return _sdk_build(GetMessageRequest, message_id=message_id)
++        return _sdk_build(
++            GetMessageRequest,
++            message_id=message_id,
++            card_msg_content_type="user_card_content",
++        )
+ 
+     @staticmethod
+     def _build_message_resource_request(*, message_id: str, file_key: str, resource_type: str) -> Any:
+diff --git a/tests/agent/test_account_usage.py b/tests/agent/test_account_usage.py
+index 4de28b8..a457740 100644
+--- a/tests/agent/test_account_usage.py
++++ b/tests/agent/test_account_usage.py
+@@ -118,6 +118,34 @@ def test_codex_usage_falls_back_to_native_credential_pool(monkeypatch, codex_usa
+     assert "ChatGPT-Account-Id" not in calls[0]["headers"]
+ 
+ 
++def test_codex_usage_labels_primary_seven_day_window_as_weekly(monkeypatch):
++    calls = []
++    payload = {
++        "plan_type": "prolite",
++        "rate_limit": {
++            "primary_window": {
++                "used_percent": 2,
++                "limit_window_seconds": 604800,
++                "reset_at": 1787134419,
++            },
++            "secondary_window": None,
++        },
++        "rate_limit_reset_credits": {"available_count": 0},
++        "credits": {"has_credits": False},
++    }
++    monkeypatch.setattr(account_usage.httpx, "Client", lambda timeout: _FakeClient(calls, payload))
++
++    snapshot = account_usage.fetch_account_usage(
++        "openai-codex",
++        base_url="https://chatgpt.com/backend-api/codex",
++        api_key="live-agent-token",
++    )
++
++    assert snapshot is not None
++    assert [w.label for w in snapshot.windows] == ["Weekly"]
++    assert "You have 0 resets banked - use /usage reset to activate" in snapshot.details
++
++
+ 
+ 
+ def test_codex_usage_account_id_read_failure_keeps_singleton_token(monkeypatch, codex_usage_payload):
+diff --git a/tests/agent/test_coding_context.py b/tests/agent/test_coding_context.py
+index 58ed8d9..989ae90 100644
+--- a/tests/agent/test_coding_context.py
++++ b/tests/agent/test_coding_context.py
+@@ -17,6 +17,11 @@ def test_coding_guidance_advertises_persistent_terminal_state():
+     assert "instead of re-sourcing it before every test command" in cc.CODING_AGENT_GUIDANCE
+ 
+ 
++def test_coding_guidance_preserves_verification_status_and_stops_after_pass():
++    assert "connect later checks with `&&`" in cc.CODING_AGENT_GUIDANCE
++    assert "Once fresh relevant checks pass, stop" in cc.CODING_AGENT_GUIDANCE
++
++
+ def _git_init(path):
+     env = {
+         "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+@@ -156,6 +161,20 @@ class TestProjectFacts:
+         assert facts.verify_commands == ["pnpm run test"]  # dev excluded
+         assert facts.context_files == []
+ 
++    def test_detects_unittest_suite_without_pytest_configuration(self, tmp_path):
++        (tmp_path / "pyproject.toml").write_text(
++            "[project]\nname = 'unittest-project'\n"
++        )
++        tests = tmp_path / "tests"
++        tests.mkdir()
++        (tests / "test_example.py").write_text(
++            "import unittest\n\nclass Example(unittest.TestCase):\n    pass\n"
++        )
++
++        facts = cc.detect_project_facts(tmp_path)
++
++        assert facts.verify_commands == ["python -m unittest discover -s tests"]
++
+     def test_project_facts_for_matches_prompt_block(self, tmp_path):
+         # Invariant: the structured facts the UI consumes must not drift from the
+         # commands the prompt snapshot renders — one detector feeds both.
+diff --git a/tests/agent/test_verification_evidence.py b/tests/agent/test_verification_evidence.py
+index aae41ed..b4d8799 100644
+--- a/tests/agent/test_verification_evidence.py
++++ b/tests/agent/test_verification_evidence.py
+@@ -28,6 +28,15 @@ def _python_project(root: Path) -> None:
+     (root / "pyproject.toml").write_text("[tool.pytest.ini_options]\n")
+ 
+ 
++def _unittest_project(root: Path) -> None:
++    (root / "pyproject.toml").write_text("[project]\nname = 'unit-project'\n")
++    tests = root / "tests"
++    tests.mkdir()
++    (tests / "test_example.py").write_text(
++        "import unittest\n\nclass Example(unittest.TestCase):\n    pass\n"
++    )
++
++
+ 
+ 
+ 
+@@ -145,6 +154,26 @@ def test_final_verifier_after_sequence_owns_shell_exit_status(
+     assert evidence.status == expected
+ 
+ 
++def test_python3_unittest_discovery_matches_python_canonical_command(
++    tmp_path, monkeypatch
++):
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
++    _unittest_project(tmp_path)
++
++    evidence = classify_verification_command(
++        "python3 -m unittest discover -s tests -v && git diff --check",
++        cwd=tmp_path,
++        session_id="s1",
++        exit_code=0,
++    )
++
++    assert evidence is not None
++    assert evidence.canonical_command == "python -m unittest discover -s tests"
++    assert evidence.kind == "test"
++    assert evidence.scope == "full"
++    assert evidence.status == "passed"
++
++
+ def test_quoted_shell_operator_remains_a_verifier_argument(tmp_path, monkeypatch):
+     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+     _python_project(tmp_path)
+diff --git a/tests/gateway/test_feishu.py b/tests/gateway/test_feishu.py
+index 2d1783e..d076e5d 100644
+--- a/tests/gateway/test_feishu.py
++++ b/tests/gateway/test_feishu.py
+@@ -68,6 +68,31 @@ class TestConfigEnvOverrides(unittest.TestCase):
+ class TestFeishuMessageNormalization(unittest.TestCase):
+ 
+ 
++    def test_normalize_cardkit_v2_original_content_ignores_layout_metadata(self):
++        from plugins.platforms.feishu.adapter import normalize_feishu_message
++
++        normalized = normalize_feishu_message(
++            message_type="interactive",
++            raw_content=json.dumps(
++                {
++                    "schema": "2.0",
++                    "body": {
++                        "elements": [{
++                            "tag": "markdown",
++                            "content": "📈 两个 Cron 已合并",
++                            "element_id": "streaming_content",
++                            "margin": "8px 0px 0px 0px",
++                            "text_align": "left",
++                            "text_size": "normal_v2",
++                        }]
++                    },
++                }
++            ),
++        )
++
++        self.assertEqual(normalized.text_content, "📈 两个 Cron 已合并")
++
++
+     def test_normalize_interactive_card_preserves_title_body_and_actions(self):
+         from plugins.platforms.feishu.adapter import normalize_feishu_message
+ 
+@@ -101,6 +126,27 @@ class TestFeishuMessageNormalization(unittest.TestCase):
+ 
+ 
+ class TestFeishuAdapterMessaging(unittest.TestCase):
++    @patch.dict(os.environ, {}, clear=True)
++    def test_reply_lookup_requests_original_card_content(self):
++        from plugins.platforms.feishu.adapter import FeishuAdapter
++
++        request = FeishuAdapter._build_get_message_request("om_card")
++
++        self.assertEqual(request.message_id, "om_card")
++        self.assertEqual(request.card_msg_content_type, "user_card_content")
++
++    @patch.dict(os.environ, {}, clear=True)
++    def test_runtime_status_does_not_fall_back_to_live_home_during_tests(self):
++        """A clear=True test environment must not overwrite live gateway state."""
++        from gateway.config import PlatformConfig
++        from plugins.platforms.feishu.adapter import FeishuAdapter
++
++        adapter = FeishuAdapter(PlatformConfig())
++        with patch("gateway.status.write_runtime_status") as write_status:
++            adapter._mark_connected()
++
++        write_status.assert_not_called()
++
+     @unittest.skipUnless(_HAS_LARK_OAPI, "lark-oapi not installed")
+     def test_websocket_sdk_accepts_channel_ua_tag(self):
+         """The shipped SDK must support the Channel signaling argument.
+@@ -1192,7 +1238,7 @@ class TestAdapterBehavior(unittest.TestCase):
+ 
+ 
+     @patch.dict(os.environ, {}, clear=True)
+-    def test_send_document_reply_uses_thread_flag(self):
++    def test_send_document_reply_is_flat_group_message_by_default(self):
+         from gateway.config import PlatformConfig
+         from plugins.platforms.feishu.adapter import FeishuAdapter
+ 
+@@ -1207,11 +1253,11 @@ class TestAdapterBehavior(unittest.TestCase):
+                 )
+ 
+         class _MessageAPI:
+-            def reply(self, request):
++            def create(self, request):
+                 captured["request"] = request
+                 return SimpleNamespace(
+                     success=lambda: True,
+-                    data=SimpleNamespace(message_id="om_file_reply"),
++                    data=SimpleNamespace(message_id="om_file_create"),
+                 )
+ 
+         adapter._client = SimpleNamespace(
+@@ -1244,7 +1290,8 @@ class TestAdapterBehavior(unittest.TestCase):
+             os.unlink(file_path)
+ 
+         self.assertTrue(result.success)
+-        self.assertTrue(captured["request"].request_body.reply_in_thread)
++        self.assertEqual(captured["request"].receive_id_type, "chat_id")
++        self.assertEqual(captured["request"].request_body.receive_id, "oc_chat")
+ 
+ 
+     @patch.dict(os.environ, {}, clear=True)
+@@ -1916,17 +1963,52 @@ class TestProcessingReactions(unittest.TestCase):
+ 
+     # --------------------------------------------------------------- complete
+     @patch.dict(os.environ, {}, clear=True)
+-    def test_success_removes_typing_and_adds_nothing(self):
++    def test_success_replaces_typing_with_done(self):
+         adapter, tracker = self._build_adapter(next_reaction_id="r_typing")
+         with self._patch_to_thread():
+             self._run(adapter.on_processing_start(self._event()))
+             self._run(
+                 adapter.on_processing_complete(self._event(), ProcessingOutcome.SUCCESS)
+             )
+-        self.assertEqual(tracker.create_calls, ["Typing"])
++        self.assertEqual(tracker.create_calls, ["Typing", "DONE"])
+         self.assertEqual(tracker.delete_calls, ["r_typing"])
+         self.assertNotIn("om_msg", adapter._pending_processing_reactions)
+ 
++    @patch.dict(os.environ, {}, clear=True)
++    def test_update_keeps_typing_until_detached_updater_finishes(self):
++        adapter, tracker = self._build_adapter(next_reaction_id="r_typing")
++        event = SimpleNamespace(
++            message_id="om_update",
++            text="/update",
++            get_command=lambda: "update",
++        )
++        with tempfile.TemporaryDirectory() as tmpdir:
++            home = Path(tmpdir)
++            (home / ".update_pending.json").write_text("{}", encoding="utf-8")
++            with self._patch_to_thread(), patch(
++                "plugins.platforms.feishu.adapter.get_hermes_home",
++                return_value=home,
++            ):
++                self._run(adapter.on_processing_start(event))
++                self._run(
++                    adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
++                )
++
++        self.assertEqual(tracker.create_calls, ["Typing"])
++        self.assertEqual(tracker.delete_calls, [])
++        self.assertEqual(
++            adapter._pending_processing_reactions["om_update"], "r_typing"
++        )
++
++        with self._patch_to_thread():
++            self._run(
++                adapter.finalize_processing_reaction(
++                    "om_update", ProcessingOutcome.SUCCESS
++                )
++            )
++        self.assertEqual(tracker.create_calls, ["Typing", "DONE"])
++        self.assertEqual(tracker.delete_calls, ["r_typing"])
++
+     @patch.dict(os.environ, {}, clear=True)
+     def test_failure_removes_typing_then_adds_cross_mark(self):
+         adapter, tracker = self._build_adapter(next_reaction_id="r_typing")
+@@ -2321,6 +2403,31 @@ class TestFeishuProcessInboundMessage(unittest.TestCase):
+         self.assertIn("[Mentioned: Alice (open_id=ou_alice), Bob (open_id=ou_bob)]", event.text)
+         self.assertIn("@Alice @Bob make a group", event.text)
+ 
++    def test_reply_lookup_includes_chat_id_for_persisted_card_text(self):
++        adapter = self._build_adapter()
++        message = SimpleNamespace(
++            content=json.dumps({"text": "现在测试一次试试"}),
++            message_type="text",
++            message_id="m_reply",
++            mentions=[],
++            chat_id="oc_chat",
++            parent_id="om_card",
++            upper_message_id=None,
++            thread_id=None,
++        )
++
++        asyncio.run(
++            adapter._process_inbound_message(
++                data=message,
++                message=message,
++                sender_id=None,
++                chat_type="group",
++                message_id="m_reply",
++            )
++        )
++
++        adapter._fetch_message_text.assert_awaited_once_with("om_card", "oc_chat")
++
+     def test_command_message_never_injects_hint(self):
+         adapter = self._build_adapter()
+         bot_mention = SimpleNamespace(
+@@ -2397,6 +2504,51 @@ class TestFeishuFetchMessageText(unittest.TestCase):
+         result = asyncio.run(adapter._fetch_message_text("m_parent"))
+         self.assertEqual(result, "@Hermes hi")
+ 
++    def test_cardkit_send_records_rendered_text_for_future_replies(self):
++        from gateway.platforms.base import SendResult
++
++        adapter = self._build_adapter()
++        adapter._create_cardkit_card = AsyncMock(
++            return_value=SendResult(success=True, message_id="card_123")
++        )
++        adapter._feishu_send_with_retry = AsyncMock(return_value=object())
++        adapter._finalize_send_result = Mock(
++            return_value=SendResult(success=True, message_id="om_card")
++        )
++        adapter._remember_outbound_message_type = Mock()
++        adapter._remember_stream_card_state = Mock()
++        adapter._remember_outbound_message_text = Mock()
++
++        result = asyncio.run(
++            adapter._send_cardkit_stream_message(
++                chat_id="oc_chat",
++                content="📈 两个 Cron 已合并",
++                reply_to=None,
++                metadata={"expect_edits": True},
++            )
++        )
++
++        self.assertTrue(result.success)
++        adapter._remember_outbound_message_text.assert_called_once_with(
++            "oc_chat", "om_card", "📈 两个 Cron 已合并"
++        )
++
++    def test_fetch_message_text_restores_persisted_card_after_restart(self):
++        with tempfile.TemporaryDirectory() as temp_home:
++            with patch.dict(os.environ, {"HERMES_HOME": temp_home}, clear=False):
++                writer = self._build_adapter()
++                writer._remember_outbound_message_text(
++                    "oc_chat", "om_card", "📈 两个 Cron 已合并"
++                )
++
++                reader = self._build_adapter()
++                result = asyncio.run(
++                    reader._fetch_message_text("om_card", "oc_chat")
++                )
++
++        self.assertEqual(result, "📈 两个 Cron 已合并")
++        reader._client.im.v1.message.get.assert_not_called()
++
+ 
+ class TestFeishuMentionEndToEnd(unittest.TestCase):
+     """High-level scenarios from the design spec — verify the full pipeline."""
+@@ -2520,5 +2672,3 @@ class TestChatLockEviction(unittest.TestCase):
+ 
+         adapter = self._make_adapter()
+         self.assertIsInstance(adapter._chat_locks, _collections.OrderedDict)
+-
+-
+diff --git a/tests/gateway/test_incomplete_gateway_turns.py b/tests/gateway/test_incomplete_gateway_turns.py
+index 6a372f3..8321131 100644
+--- a/tests/gateway/test_incomplete_gateway_turns.py
++++ b/tests/gateway/test_incomplete_gateway_turns.py
+@@ -151,5 +151,47 @@ async def test_incomplete_codex_turn_stays_out_of_slack_transcript(monkeypatch,
+     assert runner.session_store.append_to_transcript.call_args_list[1].args[1]["content"] == "hello"
+     assert adapter.processing_hooks == [
+         ("start", "m-1"),
+-        ("complete", "m-1", ProcessingOutcome.SUCCESS),
++        ("complete", "m-1", ProcessingOutcome.FAILURE),
++    ]
++
++
++@pytest.mark.asyncio
++async def test_delivered_transient_error_is_not_reported_as_success(monkeypatch, tmp_path):
++    adapter = CaptureSlackAdapter()
++    runner = _make_runner(adapter)
++    runner._run_agent = AsyncMock(
++        return_value={
++            "final_response": "API call failed after 3 retries: Connection error.",
++            "messages": [{"role": "user", "content": "hello"}],
++            "tools": [],
++            "history_offset": 0,
++            "api_calls": 3,
++            "failed": True,
++            "completed": False,
++            "interrupted": False,
++            "error": "Connection error.",
++            "last_prompt_tokens": 100,
++        }
++    )
++
++    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
++    monkeypatch.setattr(
++        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"}
++    )
++    monkeypatch.setattr(
++        "agent.model_metadata.get_model_context_length",
++        lambda *_args, **_kwargs: 100,
++    )
++    monkeypatch.setenv("SLACK_HOME_CHANNEL", "C123")
++
++    adapter.set_message_handler(runner._handle_message)
++    adapter._keep_typing = lambda *_args, **_kwargs: asyncio.Event().wait()
++
++    event = _make_event()
++    await adapter._process_message_background(event, build_session_key(event.source))
++
++    assert len(adapter.sent) == 1
++    assert adapter.processing_hooks == [
++        ("start", "m-1"),
++        ("complete", "m-1", ProcessingOutcome.FAILURE),
+     ]
+diff --git a/tests/gateway/test_stream_consumer.py b/tests/gateway/test_stream_consumer.py
+index 2ee663d..0d75a3f 100644
+--- a/tests/gateway/test_stream_consumer.py
++++ b/tests/gateway/test_stream_consumer.py
+@@ -45,6 +45,7 @@ class TestCleanForDisplay:
+         )
+         assert "MEDIA:" not in result
+ 
++
+     def test_media_tag_double_quoted_json_context_stays_visible(self):
+         """A double-quoted tag preceded by a colon sits in a JSON value
+         context (#34375): extract_media masks it and never delivers, so
+@@ -73,6 +74,80 @@ class TestCleanForDisplay:
+         assert "MEDIA:" not in result
+ 
+ 
++class _InlineProgressAdapter:
++    STREAM_PROGRESS_IN_CONTENT = True
++    REQUIRES_EDIT_FINALIZE = True
++    MAX_MESSAGE_LENGTH = 8000
++
++    def __init__(self):
++        self.sent = []
++        self.edited = []
++
++    async def send(self, chat_id, content, reply_to=None, metadata=None):
++        self.sent.append({
++            "chat_id": chat_id, "content": content, "reply_to": reply_to,
++            "metadata": metadata,
++        })
++        return SimpleNamespace(success=True, message_id="card-message")
++
++    async def edit_message(
++        self, chat_id, message_id, content, *, finalize=False, metadata=None,
++    ):
++        self.edited.append({
++            "chat_id": chat_id, "message_id": message_id, "content": content,
++            "finalize": finalize, "metadata": metadata,
++        })
++        return SimpleNamespace(success=True, message_id=message_id)
++
++
++class TestInlineProgressStream:
++    @pytest.mark.asyncio
++    async def test_progress_and_answer_share_one_message_then_finalize_body_only(self):
++        adapter = _InlineProgressAdapter()
++        consumer = GatewayStreamConsumer(
++            adapter, "chat", StreamConsumerConfig(edit_interval=0, buffer_threshold=1, cursor=""),
++            initial_reply_to_id="user-message",
++        )
++        task = asyncio.create_task(consumer.run())
++
++        consumer.on_tool_progress("```shell\npython check.py\n```")
++        await asyncio.sleep(0.08)
++        consumer.on_delta("正在整理")
++        await asyncio.sleep(0.08)
++        consumer.set_final_metadata(feishu_stream_footer="已完成 · gpt-5.6")
++        consumer.finish("最终正文")
++        await asyncio.wait_for(task, timeout=2)
++
++        assert len(adapter.sent) == 1
++        assert adapter.sent[0]["reply_to"] == "user-message"
++        assert adapter.sent[0]["metadata"]["expect_edits"] is True
++        assert "```" not in adapter.sent[0]["content"]
++        assert "python check.py" in adapter.sent[0]["content"]
++        assert any(
++            "最近进度" in call["content"]
++            and call["content"].index("python check.py") < call["content"].index("回复")
++            and "正在整理" in call["content"]
++            for call in adapter.edited
++            if not call["finalize"]
++        )
++        assert adapter.edited[-1]["finalize"] is True
++        assert adapter.edited[-1]["content"] == "最终正文"
++        assert adapter.edited[-1]["metadata"]["feishu_stream_footer"] == "已完成 · gpt-5.6"
++
++    def test_progress_keeps_only_recent_sanitized_lines(self):
++        consumer = GatewayStreamConsumer(_InlineProgressAdapter(), "chat")
++        for index in range(9):
++            consumer._update_inline_progress(f"```text\nline {index}\n```")
++        rendered = consumer._compose_inline_content()
++
++        assert "```" not in rendered
++        assert "line 0" not in rendered
++        assert "line 2" not in rendered
++        assert "line 3" in rendered
++        assert "line 8" in rendered
++        assert rendered.count("• ") == 6
++
++
+ # ── Integration: _send_or_edit strips MEDIA: ─────────────────────────────
+ 
+ 
+@@ -1487,4 +1562,3 @@ class TestFlushPendingSync:
+ 
+         consumer.finish()
+         await task
+-
+diff --git a/tests/gateway/test_weixin.py b/tests/gateway/test_weixin.py
+index 52a6e82..1b42c97 100644
+--- a/tests/gateway/test_weixin.py
++++ b/tests/gateway/test_weixin.py
+@@ -4,6 +4,7 @@ import asyncio
+ import base64
+ import json
+ import os
++from types import SimpleNamespace
+ from unittest.mock import AsyncMock, Mock, patch
+ 
+ import pytest
+@@ -140,6 +141,32 @@ class TestWeixinConfig:
+ 
+         assert config.get_connected_platforms() == [Platform.WEIXIN]
+ 
++    @pytest.mark.asyncio
++    async def test_processing_ack_is_immediate_for_normal_turns(self):
++        adapter = _make_adapter()
++        adapter.send = AsyncMock(return_value=SendResult(success=True))
++        event = SimpleNamespace(
++            text="帮我点瑞幸",
++            source=SimpleNamespace(chat_id="user@im.wechat"),
++        )
++
++        await adapter.send_processing_ack(event, "session")
++
++        adapter.send.assert_awaited_once_with("user@im.wechat", "已收到，思考中")
++
++    @pytest.mark.asyncio
++    async def test_processing_ack_skips_slash_commands(self):
++        adapter = _make_adapter()
++        adapter.send = AsyncMock(return_value=SendResult(success=True))
++        event = SimpleNamespace(
++            text="/new",
++            source=SimpleNamespace(chat_id="user@im.wechat"),
++        )
++
++        await adapter.send_processing_ack(event, "session")
++
++        adapter.send.assert_not_awaited()
++
+ 
+ class TestWeixinStatePersistence:
+     def test_save_weixin_account_preserves_existing_file_on_replace_failure(self, tmp_path, monkeypatch):
+@@ -254,6 +281,7 @@ class TestWeixinSendMessageIntegration:
+         assert _parse_target_ref("weixin", "wxid_test123") == ("wxid_test123", None, True)
+         assert _parse_target_ref("weixin", "filehelper") == ("filehelper", None, True)
+         assert _parse_target_ref("weixin", "group@chatroom") == ("group@chatroom", None, True)
++        assert _parse_target_ref("weixin", "user@im.wechat") == ("user@im.wechat", None, True)
+ 
+ 
+ class TestWeixinChunkDelivery:
+@@ -372,9 +400,12 @@ class TestWeixinOutboundMedia:
+ 
+         with patch("gateway.platforms.weixin._get_upload_url", new=AsyncMock(return_value={"upload_full_url": "https://upload.example.com/media"})), \
+              patch("gateway.platforms.weixin._api_post", new_callable=AsyncMock) as api_post_mock, \
++             patch("gateway.platforms.weixin._send_message", new_callable=AsyncMock) as send_message_mock, \
+              patch("gateway.platforms.weixin.secrets.token_hex", return_value="filekey-123"), \
+              patch("gateway.platforms.weixin.secrets.token_bytes", return_value=aes_key):
+-            message_id = asyncio.run(adapter._send_file("wxid_test123", str(image_path), ""))
++            message_id = asyncio.run(
++                adapter._send_file("wxid_test123", str(image_path), "订单已创建")
++            )
+ 
+         assert message_id.startswith("hermes-weixin-")
+         assert len(session.post_calls) == 1
+@@ -386,9 +417,119 @@ class TestWeixinOutboundMedia:
+         # aiohttp.ClientTimeout, so it no longer appears as a post() kwarg.
+         assert "timeout" not in upload_kwargs
+         payload = api_post_mock.await_args.kwargs["payload"]
+-        media = payload["msg"]["item_list"][0]["image_item"]["media"]
++        items = payload["msg"]["item_list"]
++        assert items[0] == {
++            "type": weixin.ITEM_TEXT,
++            "text_item": {"text": "订单已创建"},
++        }
++        media = items[1]["image_item"]["media"]
+         assert media["encrypt_query_param"] == "enc-param"
+         assert media["aes_key"] == expected_aes_key
++        send_message_mock.assert_not_awaited()
++
++    def test_send_file_rejects_ilink_business_error(self, tmp_path):
++        image_path = tmp_path / "demo.png"
++        image_path.write_bytes(b"fake-png-bytes")
++        adapter = _make_adapter()
++        adapter._send_session = object()
++        adapter._token = "test-token"
++        adapter._base_url = "https://weixin.example.com"
++        adapter._token_store.get = lambda account_id, chat_id: None
++
++        with patch(
++            "gateway.platforms.weixin._get_upload_url",
++            new=AsyncMock(return_value={"upload_full_url": "https://upload.example.com/media"}),
++        ), patch(
++            "gateway.platforms.weixin._upload_ciphertext",
++            new=AsyncMock(return_value="enc-param"),
++        ), patch(
++            "gateway.platforms.weixin._api_post",
++            new=AsyncMock(return_value={"ret": 1, "errcode": 1, "errmsg": "rejected"}),
++        ):
++            with pytest.raises(RuntimeError, match="iLink media send error"):
++                asyncio.run(adapter._send_file("wxid_test123", str(image_path), "下单成功"))
++
++    def test_send_file_retries_stale_context_without_token(self, tmp_path):
++        image_path = tmp_path / "demo.png"
++        image_path.write_bytes(b"fake-png-bytes")
++        adapter = _make_adapter()
++        adapter._send_session = object()
++        adapter._token = "test-token"
++        adapter._base_url = "https://weixin.example.com"
++        asyncio.run(
++            adapter._token_store.set(
++                "test-account", "wxid_test123", "stale-context"
++            )
++        )
++
++        with patch(
++            "gateway.platforms.weixin._get_upload_url",
++            new=AsyncMock(return_value={"upload_full_url": "https://upload.example.com/media"}),
++        ), patch(
++            "gateway.platforms.weixin._upload_ciphertext",
++            new=AsyncMock(return_value="enc-param"),
++        ), patch(
++            "gateway.platforms.weixin._api_post",
++            new=AsyncMock(
++                side_effect=[
++                    {"ret": -14, "errcode": -14, "errmsg": "session expired"},
++                    {"ret": 0, "errcode": 0},
++                ]
++            ),
++        ) as api_post_mock:
++            message_id = asyncio.run(
++                adapter._send_file("wxid_test123", str(image_path), "下单成功")
++            )
++
++        assert message_id.startswith("hermes-weixin-")
++        assert api_post_mock.await_count == 2
++        first_payload = api_post_mock.await_args_list[0].kwargs["payload"]["msg"]
++        second_payload = api_post_mock.await_args_list[1].kwargs["payload"]["msg"]
++        assert first_payload["context_token"] == "stale-context"
++        assert "context_token" not in second_payload
++
++    def test_cdn_upload_retries_transient_connection_error(self):
++        class _UploadResponse:
++            status = 200
++            headers = {"x-encrypted-param": "enc-param"}
++
++            async def __aenter__(self):
++                return self
++
++            async def __aexit__(self, exc_type, exc, tb):
++                return False
++
++            async def read(self):
++                return b""
++
++        class _FailingUpload:
++            async def __aenter__(self):
++                raise weixin.aiohttp.ClientConnectionError("temporary CDN failure")
++
++            async def __aexit__(self, exc_type, exc, tb):
++                return False
++
++        class _RetryingSession:
++            def __init__(self):
++                self.calls = 0
++
++            def post(self, *_args, **_kwargs):
++                self.calls += 1
++                return _FailingUpload() if self.calls == 1 else _UploadResponse()
++
++        session = _RetryingSession()
++        with patch("gateway.platforms.weixin.asyncio.sleep", new_callable=AsyncMock) as sleep_mock:
++            result = asyncio.run(
++                weixin._upload_ciphertext(
++                    session,
++                    ciphertext=b"encrypted",
++                    upload_url="https://novac2c.cdn.weixin.qq.com/upload",
++                )
++            )
++
++        assert result == "enc-param"
++        assert session.calls == 2
++        sleep_mock.assert_awaited_once_with(0.5)
+ 
+ 
+ class TestWeixinRemoteMediaSafety:
+@@ -509,6 +650,64 @@ class TestWeixinSendImageFileParameterName:
+             metadata={"thread_id": "thread-123"},
+         )
+ 
++    @patch.object(WeixinAdapter, "send_image_file", new_callable=AsyncMock)
++    def test_send_text_with_image_renders_one_composite_media_send(
++        self, send_image_mock, tmp_path
++    ):
++        from PIL import Image
++
++        adapter = _make_adapter()
++        send_image_mock.return_value = weixin.SendResult(
++            success=True,
++            message_id="combined-id",
++        )
++        source = tmp_path / "pay.png"
++        Image.new("RGB", (320, 320), "white").save(source)
++
++        result = asyncio.run(
++            adapter.send_text_with_image(
++                chat_id="wxid_test123",
++                content="下单成功",
++                image_path=str(source),
++                metadata={"notify": True},
++            )
++        )
++
++        assert result.success is True
++        call = send_image_mock.await_args.kwargs
++        assert call["chat_id"] == "wxid_test123"
++        assert call["image_path"] != str(source)
++        assert call["caption"] is None
++        assert call["metadata"] == {"notify": True}
++        assert not os.path.exists(call["image_path"])
++
++    @patch.object(WeixinAdapter, "send_text_with_image", new_callable=AsyncMock)
++    def test_direct_send_combines_text_and_single_image(self, combined_send_mock, tmp_path):
++        image_path = tmp_path / "pickup.png"
++        image_path.write_bytes(b"qr")
++        combined_send_mock.return_value = weixin.SendResult(
++            success=True,
++            message_id="combined-direct-id",
++        )
++
++        result = asyncio.run(
++            weixin.send_weixin_direct(
++                extra={"account_id": "test-account"},
++                token="test-token",
++                chat_id="wxid_test123",
++                message="可以取餐了",
++                media_files=[(str(image_path), False)],
++            )
++        )
++
++        assert result["success"] is True
++        assert result["message_id"] == "combined-direct-id"
++        combined_send_mock.assert_awaited_once_with(
++            "wxid_test123",
++            "可以取餐了",
++            str(image_path),
++        )
++
+ 
+ class TestWeixinVoiceSending:
+     def _connected_adapter(self) -> WeixinAdapter:
+@@ -879,4 +1078,3 @@ class TestWeixinVoiceGatewayHandoff:
+             "VOICE event body leaked Tencent's STT text — runner would trust "
+             "the wrong transcript instead of re-transcribing (#27300)."
+         )
+-
+diff --git a/tests/hermes_cli/test_gateway_proc_fallback.py b/tests/hermes_cli/test_gateway_proc_fallback.py
+index b11feca..67f943a 100644
+--- a/tests/hermes_cli/test_gateway_proc_fallback.py
++++ b/tests/hermes_cli/test_gateway_proc_fallback.py
+@@ -332,3 +332,41 @@ class TestGetServicePidsAllProfiles:
+             pids = gateway_mod._get_service_pids(all_profiles=True)
+ 
+         assert pids == {123}
++
++
++class TestManagedGatewayDescendants:
++    class _Process:
++        def __init__(self, pid, command):
++            self.pid = pid
++            self._command = command
++
++        def cmdline(self):
++            return self._command
++
++    class _Root:
++        def __init__(self, children):
++            self._children = children
++
++        def children(self, recursive=False):
++            assert recursive is True
++            return self._children
++
++    def test_includes_gateway_child_but_not_mcp_helpers(self):
++        children = [
++            self._Process(
++                101,
++                ["python", "-m", "hermes_cli.main", "gateway", "run", "--external-supervisor"],
++            ),
++            self._Process(102, ["/usr/local/bin/xiaohongshu-mcp", "-headless=false"]),
++        ]
++        fake_psutil = MagicMock()
++        fake_psutil.Process.return_value = self._Root(children)
++
++        assert gateway_mod._managed_gateway_descendant_pids({100}, fake_psutil) == {101}
++        fake_psutil.Process.assert_called_once_with(100)
++
++    def test_unreadable_service_tree_is_ignored(self):
++        fake_psutil = MagicMock()
++        fake_psutil.Process.side_effect = RuntimeError("process vanished")
++
++        assert gateway_mod._managed_gateway_descendant_pids({100}, fake_psutil) == set()
+diff --git a/tests/hermes_cli/test_restart_plan_reconciliation.py b/tests/hermes_cli/test_restart_plan_reconciliation.py
+index b87cc98..59530c4 100644
+--- a/tests/hermes_cli/test_restart_plan_reconciliation.py
++++ b/tests/hermes_cli/test_restart_plan_reconciliation.py
+@@ -12,6 +12,7 @@ Pins:
+ from hermes_cli.update_inventory import (
+     RuntimeRecord,
+     UpdatePlan,
++    _resolve_gateway_supervisor,
+     _restart_mechanism,
+     describe_restart_mechanism,
+     match_runtime_outcomes,
+@@ -65,6 +66,26 @@ def test_windows_service_supervisor_classification():
+     assert _detect_supervisor_for_pid(42, set(), None) == "manual"
+ 
+ 
++def test_generic_external_socket_supervisor_uses_platform_classifier():
++    calls = []
++
++    def classify(pid):
++        calls.append(pid)
++        return "launchd"
++
++    assert _resolve_gateway_supervisor(41, "external", classify) == "launchd"
++    assert _resolve_gateway_supervisor(42, "external-supervisor", classify) == "launchd"
++    assert _resolve_gateway_supervisor(43, None, classify) == "launchd"
++    assert calls == [41, 42, 43]
++
++
++def test_explicit_socket_supervisor_remains_authoritative():
++    def classify(_pid):
++        raise AssertionError("explicit supervisor should not be reclassified")
++
++    assert _resolve_gateway_supervisor(41, "desktop", classify) == "desktop"
++
++
+ def test_windows_service_runtime_reconciles_via_service_profiles():
+     # The update path merges the pause token's service_profiles into
+     # relaunched_profiles after sc.exe start — a restarted SCM gateway
+diff --git a/tests/hermes_cli/test_tui_resume_flow.py b/tests/hermes_cli/test_tui_resume_flow.py
+index fe6ca2c..f8c3c07 100644
+--- a/tests/hermes_cli/test_tui_resume_flow.py
++++ b/tests/hermes_cli/test_tui_resume_flow.py
+@@ -159,12 +159,20 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
+     class FakeAgent:
+         def __init__(self, **kwargs):
+             captured.update(kwargs)
++            from agent.runtime_cwd import resolve_context_cwd
++
++            captured["context_cwd"] = resolve_context_cwd()
++            self.session_id = "oneshot-cwd-test"
+             self.suppress_status_output = False
+             self.stream_delta_callback = object()
+             self.tool_gen_callback = object()
+ 
+-        def run_conversation(self, prompt, **_kwargs):
++        def run_conversation(self, prompt, **kwargs):
+             captured["prompt"] = prompt
++            captured["task_id"] = kwargs.get("task_id")
++            from tools.terminal_tool import get_session_cwd
++
++            captured["tool_cwd"] = get_session_cwd(kwargs.get("task_id"))
+             return {"final_response": "ok", "failed": False, "partial": False}
+ 
+     class FakeSessionDB:
+@@ -179,10 +187,12 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
+ 
+     monkeypatch.setitem(sys.modules, "run_agent", mod("run_agent", AIAgent=FakeAgent))
+     monkeypatch.setitem(sys.modules, "hermes_state", mod("hermes_state", SessionDB=FakeSessionDB))
+-    monkeypatch.setitem(
+-        sys.modules,
+-        "hermes_cli.config",
+-        mod("hermes_cli.config", load_config=lambda: {"model": {"default": "m"}}),
++    import hermes_cli.config as config_mod
++
++    monkeypatch.setattr(
++        config_mod,
++        "load_config",
++        lambda: {"model": {"default": "m"}},
+     )
+     monkeypatch.setitem(
+         sys.modules,
+@@ -215,6 +225,12 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
+     assert captured["session_db"] is sentinel_db
+     assert captured["enabled_toolsets"] == ["session_search"]
+     assert captured["prompt"] == "recall this"
++    assert captured["task_id"] == "oneshot-cwd-test"
++    assert captured["context_cwd"] == Path(os.getcwd())
++    assert captured["tool_cwd"] == os.getcwd()
++    from tools.terminal_tool import get_session_cwd
++
++    assert get_session_cwd("oneshot-cwd-test") is None
+ 
+ 
+ def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):
+@@ -282,6 +298,3 @@ def test_make_tui_argv_dev_prebuilds_hermes_ink(monkeypatch, main_mod, tmp_path)
+     assert cwd == tui_dir
+     assert calls == [(["/usr/bin/npm", "run", "build"], str(ink_dir))]
+ 
+-
+-
+-
+diff --git a/tests/hermes_cli/test_update_fleet_restart_pending.py b/tests/hermes_cli/test_update_fleet_restart_pending.py
+index 156573a..7140d90 100644
+--- a/tests/hermes_cli/test_update_fleet_restart_pending.py
++++ b/tests/hermes_cli/test_update_fleet_restart_pending.py
+@@ -292,6 +292,64 @@ def test_run_pending_restart_true_when_no_gateways(monkeypatch, capsys):
+     assert "nothing to restart" in capsys.readouterr().out
+ 
+ 
++def test_pending_restart_does_not_stop_fresh_supervised_gateway(monkeypatch):
++    probes = iter([[101], [202]])
++    monkeypatch.setattr(
++        "hermes_cli.gateway.find_gateway_pids", lambda **k: next(probes)
++    )
++    monkeypatch.setattr("hermes_cli.gateway.supports_systemd_services", lambda: False)
++    monkeypatch.setattr("hermes_cli.gateway.is_macos", lambda: True)
++    monkeypatch.setattr("hermes_cli.gateway.is_windows", lambda: False)
++    monkeypatch.setattr(
++        update_cmd_fleet,
++        "_restart_macos_launchd_gateways",
++        lambda restarted, failed, drain_budget: restarted.append("ai.hermes.gateway"),
++    )
++    monkeypatch.setattr(hermes_main, "_purge_stale_hermes_modules", lambda: None)
++    monkeypatch.setattr(
++        "gateway.status.get_process_start_time", lambda pid: float(pid)
++    )
++
++    stopped = []
++    monkeypatch.setattr(
++        "gateway.status.terminate_pid", lambda pid, **kwargs: stopped.append(pid)
++    )
++
++    assert update_cmd._run_pending_fleet_restart() is True
++    assert stopped == []
++
++
++def test_pending_restart_stops_only_original_survivor(monkeypatch):
++    probes = iter([[101], [101, 202]])
++    monkeypatch.setattr(
++        "hermes_cli.gateway.find_gateway_pids", lambda **k: next(probes)
++    )
++    monkeypatch.setattr("hermes_cli.gateway.supports_systemd_services", lambda: False)
++    monkeypatch.setattr("hermes_cli.gateway.is_macos", lambda: True)
++    monkeypatch.setattr("hermes_cli.gateway.is_windows", lambda: False)
++    monkeypatch.setattr(
++        update_cmd_fleet,
++        "_restart_macos_launchd_gateways",
++        lambda restarted, failed, drain_budget: restarted.append("ai.hermes.gateway"),
++    )
++    monkeypatch.setattr(hermes_main, "_purge_stale_hermes_modules", lambda: None)
++    monkeypatch.setattr(
++        "gateway.status.get_process_start_time", lambda pid: float(pid)
++    )
++
++    stopped = []
++    monkeypatch.setattr(
++        "gateway.status.terminate_pid",
++        lambda pid, **kwargs: stopped.append((pid, kwargs)),
++    )
++    monkeypatch.setattr(
++        "hermes_cli.gateway._wait_for_pid_exit", lambda pid, timeout: True
++    )
++
++    assert update_cmd._run_pending_fleet_restart() is True
++    assert stopped == [(101, {"expected_start_time": 101.0})]
++
++
+ # ---------------------------------------------------------------------------
+ # cmd_update integration (mocked git / restart)
+ # ---------------------------------------------------------------------------
+diff --git a/tools/delegate_tool.py b/tools/delegate_tool.py
+index 70e98fe..e88cba9 100644
+--- a/tools/delegate_tool.py
++++ b/tools/delegate_tool.py
+@@ -345,6 +345,31 @@ def _build_children(
+     return children, None
+ 
+ 
++def _synchronous_platform_requested(cfg: Dict[str, Any]) -> str:
++    """Return the current gateway platform when config keeps delegation in-band."""
++    raw_sync_platforms = cfg.get("synchronous_platforms") or []
++    if isinstance(raw_sync_platforms, str):
++        raw_sync_platforms = raw_sync_platforms.split(",")
++    sync_platforms = (
++        {
++            str(item).strip().lower()
++            for item in raw_sync_platforms
++            if str(item).strip()
++        }
++        if isinstance(raw_sync_platforms, (list, tuple, set))
++        else set()
++    )
++    try:
++        from gateway.session_context import get_session_env
++
++        current_platform = get_session_env(
++            "HERMES_SESSION_PLATFORM", ""
++        ).strip().lower()
++    except Exception:
++        current_platform = ""
++    return current_platform if current_platform in sync_platforms else ""
++
++
+ def delegate_task(
+     goal: Optional[str] = None, context: Optional[str] = None, tasks: Optional[List[Dict[str, Any]]] = None,
+     max_iterations: Optional[int] = None, role: Optional[str] = None, background: Optional[bool] = None,
+@@ -386,6 +411,14 @@ def delegate_task(
+         )
+ 
+     cfg = _load_config()
++    if background:
++        current_platform = _synchronous_platform_requested(cfg)
++        if current_platform:
++            logger.info(
++                "delegate_task: background delegation is synchronous for platform=%s",
++                current_platform,
++            )
++            background = False
+     default_max_iter = cfg.get("max_iterations", DEFAULT_MAX_ITERATIONS)
+     # Caller-supplied max_iterations is ignored: the config value is authoritative
+     # so budgets stay predictable (kwarg kept for internal callers/tests).
+diff --git a/tools/send_message_targets.py b/tools/send_message_targets.py
+index 7e630b4..561b8ad 100644
+--- a/tools/send_message_targets.py
++++ b/tools/send_message_targets.py
+@@ -17,7 +17,10 @@ _SLACK_USER_NAME_RE = re.compile(r"^\s*@([A-Za-z0-9._-]{1,80})\s*$")
+ _SLACK_MENTION_RE = re.compile(r"^\s*<@(U[A-Z0-9]{8,})(?:\|[^>]+)?>\s*$")
+ # Session-derived Slack thread targets use "<conversation_id>:<thread_ts>".
+ _SLACK_THREAD_TARGET_RE = re.compile(r"^\s*([CGD][A-Z0-9]{8,}):([^\s:]+)\s*$")
+-_WEIXIN_TARGET_RE = re.compile(r"^\s*((?:wxid|gh|v\d+|wm|wb)_[A-Za-z0-9_-]+|[A-Za-z0-9._-]+@chatroom|filehelper)\s*$")
++_WEIXIN_TARGET_RE = re.compile(
++    r"^\s*((?:wxid|gh|v\d+|wm|wb)_[A-Za-z0-9_-]+|"
++    r"[A-Za-z0-9._-]+@(?:chatroom|im\.wechat)|filehelper)\s*$"
++)
+ _YUANBAO_TARGET_RE = re.compile(r"^\s*((?:group|direct):[^:]+)\s*$")
+ # E.164 phone recipients ("+1555..."): the '+' fails the isdigit() rule and the channel directory
+ # cannot resolve a raw number, so keep the '+' and treat it as explicit.
+diff --git a/hermes_cli/companion_cli_updates.py b/hermes_cli/companion_cli_updates.py
+new file mode 100644
+index 0000000..23b2c54
+--- /dev/null
++++ b/hermes_cli/companion_cli_updates.py
+@@ -0,0 +1,281 @@
++"""Update installed command-line companions used alongside Hermes."""
++
++from __future__ import annotations
++
++import json
++import os
++import re
++import shutil
++import subprocess
++import tempfile
++from datetime import datetime, timezone
++from pathlib import Path
++from typing import Callable, Mapping, Optional
++
++
++_RUNTIME_PACKAGE_EXCLUSIONS = {
++    # This package is the live Feishu gateway plugin, not merely a CLI. It has
++    # its own compatibility lifecycle and must not be swept up by generic CLI
++    # updates just because it exposes an installer binary.
++    "@colinlu50/openclaw-lark-stream",
++}
++
++
++def companion_cli_updates_enabled() -> bool:
++    try:
++        from hermes_cli.config import load_config
++
++        updates = (load_config() or {}).get("updates", {})
++        value = updates.get("update_companion_clis", False) if isinstance(updates, dict) else False
++    except Exception:
++        return False
++    if isinstance(value, str):
++        return value.strip().lower() not in {"0", "false", "no", "off"}
++    return bool(value)
++
++
++def _npm_root(npm: str, run: Callable = subprocess.run) -> Optional[Path]:
++    result = run([npm, "root", "-g"], capture_output=True, text=True, check=False)
++    if result.returncode != 0 or not result.stdout.strip():
++        return None
++    return Path(result.stdout.strip())
++
++
++def discover_outdated_npm_clis(
++    *,
++    npm: str,
++    npm_root: Optional[Path] = None,
++    run: Callable = subprocess.run,
++) -> dict[str, Mapping[str, object]]:
++    """Return outdated global npm packages that actually expose CLI bins."""
++    result = run(
++        [npm, "outdated", "-g", "--json"],
++        capture_output=True,
++        text=True,
++        check=False,
++    )
++    raw = result.stdout.strip() or "{}"
++    try:
++        payload = json.loads(raw)
++    except json.JSONDecodeError:
++        return {}
++    if not isinstance(payload, dict):
++        return {}
++
++    root = Path(npm_root) if npm_root is not None else _npm_root(npm, run=run)
++    if root is None:
++        return {}
++    discovered: dict[str, Mapping[str, object]] = {}
++    for name, metadata in payload.items():
++        if name in _RUNTIME_PACKAGE_EXCLUSIONS or not isinstance(metadata, dict):
++            continue
++        manifest = root / name / "package.json"
++        try:
++            package = json.loads(manifest.read_text(encoding="utf-8"))
++        except (OSError, json.JSONDecodeError):
++            continue
++        if package.get("bin"):
++            discovered[name] = metadata
++    return discovered
++
++
++def sync_lark_skills_state(state_path: Path, version: str) -> None:
++    """Stamp lark's state file after the official skills installer succeeds."""
++    path = Path(state_path)
++    try:
++        payload = json.loads(path.read_text(encoding="utf-8"))
++    except (OSError, json.JSONDecodeError):
++        return
++    if not isinstance(payload, dict):
++        return
++    payload["version"] = version
++    payload["updated_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
++    path.parent.mkdir(parents=True, exist_ok=True)
++    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
++    try:
++        with os.fdopen(fd, "w", encoding="utf-8") as handle:
++            json.dump(payload, handle, ensure_ascii=False, indent=2)
++            handle.write("\n")
++        os.replace(tmp_name, path)
++    except Exception:
++        try:
++            os.unlink(tmp_name)
++        except OSError:
++            pass
++        raise
++
++
++def _tail(result: subprocess.CompletedProcess[str]) -> str:
++    text = (result.stderr or result.stdout or "").strip().splitlines()
++    return text[-1] if text else f"exit {result.returncode}"
++
++
++def _run(
++    command: list[str],
++    *,
++    env: dict[str, str],
++    timeout: int = 600,
++) -> subprocess.CompletedProcess[str]:
++    return subprocess.run(
++        command,
++        capture_output=True,
++        text=True,
++        check=False,
++        timeout=timeout,
++        env=env,
++    )
++
++
++def _lark_version(lark: str, env: dict[str, str]) -> str:
++    result = _run([lark, "--version"], env=env, timeout=30)
++    match = re.search(r"(\d+\.\d+\.\d+)", result.stdout or result.stderr or "")
++    return match.group(1) if match else ""
++
++
++def _ensure_lark_skills_synced(
++    *,
++    lark: str,
++    npx: Optional[str],
++    env: dict[str, str],
++) -> None:
++    check = _run([lark, "update", "--check", "--json"], env=env, timeout=120)
++    try:
++        payload = json.loads(check.stdout or "{}")
++    except json.JSONDecodeError:
++        payload = {}
++    skills = payload.get("skills_status", {}) if isinstance(payload, dict) else {}
++    if check.returncode == 0 and isinstance(skills, dict) and skills.get("in_sync") is not False:
++        return
++    if not npx:
++        raise RuntimeError("lark-cli Skills are out of sync and npx is unavailable")
++    install = _run([npx, "-y", "skills", "add", "larksuite/cli", "-y", "-g"], env=env)
++    if install.returncode != 0:
++        raise RuntimeError(f"lark-cli Skills sync failed: {_tail(install)}")
++    version = _lark_version(lark, env)
++    if version:
++        sync_lark_skills_state(Path.home() / ".lark-cli" / "skills-state.json", version)
++    verify = _run([lark, "update", "--check", "--json"], env=env, timeout=120)
++    try:
++        verified = json.loads(verify.stdout or "{}")
++    except json.JSONDecodeError:
++        verified = {}
++    verified_skills = verified.get("skills_status", {}) if isinstance(verified, dict) else {}
++    if verify.returncode != 0 or not isinstance(verified_skills, dict) or not verified_skills.get("in_sync"):
++        raise RuntimeError("lark-cli Skills remain out of sync after reinstall")
++
++
++def _ensure_agent_browser_entrypoint(
++    *,
++    npm: str,
++    env: dict[str, str],
++) -> bool:
++    """Repair the dangling global shim that `hermes update` can leave behind."""
++    root = _npm_root(npm)
++    manifest = root / "agent-browser" / "package.json" if root else None
++    executable = shutil.which("agent-browser")
++    # Current Hermes resolves agent-browser lazily through npx. Do not turn a
++    # chat-triggered update into an implicit global install on machines that do
++    # not already carry it (and, in particular, do not acquire a browser
++    # runtime as a side effect). Existing global installs are still repaired.
++    if not executable and not (manifest and manifest.is_file()):
++        return False
++    if manifest and manifest.is_file() and executable:
++        verify = _run([executable, "--version"], env=env, timeout=30)
++        if verify.returncode == 0:
++            return False
++
++    no_browser_env = dict(env)
++    no_browser_env["npm_config_ignore_scripts"] = "true"
++    repair = _run(
++        [npm, "install", "-g", "agent-browser@latest"],
++        env=no_browser_env,
++    )
++    if repair.returncode != 0:
++        raise RuntimeError(f"agent-browser entrypoint repair failed: {_tail(repair)}")
++    executable = shutil.which("agent-browser")
++    if not executable:
++        raise RuntimeError("agent-browser entrypoint remains unavailable after repair")
++    verify = _run([executable, "--version"], env=env, timeout=30)
++    if verify.returncode != 0:
++        raise RuntimeError(f"agent-browser remains unusable after repair: {_tail(verify)}")
++    return True
++
++
++def update_companion_clis(*, print_fn: Callable[[str], None] = print) -> list[str]:
++    """Update every outdated installed npm CLI, with tool-specific guards."""
++    npm = shutil.which("npm")
++    if not npm:
++        raise RuntimeError("npm is unavailable; companion CLIs cannot be checked")
++    npx = shutil.which("npx")
++    env = dict(os.environ)
++    env["LARKSUITE_CLI_NO_UPDATE_NOTIFIER"] = "1"
++    env["LARKSUITE_CLI_NO_SKILLS_NOTIFIER"] = "1"
++    outdated = discover_outdated_npm_clis(npm=npm)
++    updated: list[str] = []
++
++    # npm updates its own executable tree, so update it after every other CLI.
++    for package in sorted(outdated, key=lambda item: item == "npm"):
++        print_fn(f"  → Updating {package}...")
++        if package == "@openai/codex" and shutil.which("codex"):
++            result = _run([shutil.which("codex") or "codex", "update"], env=env)
++            if result.returncode != 0:
++                result = _run([npm, "install", "-g", f"{package}@latest"], env=env)
++        elif package == "@larksuite/cli" and shutil.which("lark-cli"):
++            lark = shutil.which("lark-cli") or "lark-cli"
++            result = _run([lark, "update", "--json"], env=env)
++            if result.returncode != 0:
++                result = _run([npm, "install", "-g", f"{package}@latest"], env=env)
++        elif package == "agent-browser":
++            no_browser_env = dict(env)
++            no_browser_env["npm_config_ignore_scripts"] = "true"
++            result = _run([npm, "install", "-g", f"{package}@latest"], env=no_browser_env)
++        else:
++            result = _run([npm, "install", "-g", f"{package}@latest"], env=env)
++        if result.returncode != 0:
++            raise RuntimeError(f"{package} update failed: {_tail(result)}")
++
++        if package == "@anthropic-ai/claude-code" and shutil.which("claude"):
++            verify = _run([shutil.which("claude") or "claude", "--version"], env=env, timeout=30)
++            if verify.returncode != 0:
++                root = _npm_root(npm)
++                installer = root / package / "install.cjs" if root else None
++                node = shutil.which("node")
++                if not installer or not installer.is_file() or not node:
++                    raise RuntimeError("Claude Code native binary is missing after update")
++                install_native = _run([node, str(installer)], env=env, timeout=300)
++                if install_native.returncode != 0:
++                    raise RuntimeError(f"Claude Code native install failed: {_tail(install_native)}")
++        updated.append(package)
++
++    lark = shutil.which("lark-cli")
++    if lark:
++        _ensure_lark_skills_synced(lark=lark, npx=npx, env=env)
++
++    if _ensure_agent_browser_entrypoint(npm=npm, env=env):
++        if "agent-browser" not in updated:
++            updated.append("agent-browser")
++        print_fn("  ✓ Repaired agent-browser CLI entrypoint (Chromium install skipped)")
++
++    remaining = discover_outdated_npm_clis(npm=npm)
++    if remaining:
++        raise RuntimeError("CLI updates remain pending: " + ", ".join(remaining))
++    if updated:
++        print_fn(f"  ✓ Updated {len(updated)} companion CLI(s)")
++    else:
++        print_fn("  ✓ Companion CLIs are up to date")
++    return updated
++
++
++def maybe_update_companion_clis(gateway_mode: bool) -> list[str]:
++    """Update companion CLIs only for chat-triggered update runs."""
++    if not gateway_mode or not companion_cli_updates_enabled():
++        return []
++    print("\n→ Updating companion CLIs...")
++    try:
++        return update_companion_clis()
++    except Exception as exc:
++        # A companion registry outage must not strand Hermes halfway through
++        # its own update. The warning is streamed into the existing /update
++        # card so the operator can retry without receiving an opaque crash.
++        print(f"  ⚠ Companion CLI update incomplete: {exc}")
++        return []
+diff --git a/tests/gateway/test_channel_compression_override.py b/tests/gateway/test_channel_compression_override.py
+new file mode 100644
+index 0000000..d3eff6c
+--- /dev/null
++++ b/tests/gateway/test_channel_compression_override.py
+@@ -0,0 +1,74 @@
++from types import SimpleNamespace
++from unittest.mock import MagicMock
++
++from gateway.config import Platform
++from gateway.run_turn_runner import TurnRunner
++
++
++def test_channel_compression_override_updates_live_compressor():
++    compressor = SimpleNamespace(
++        threshold_percent=0.85,
++        threshold_tokens=231_200,
++        tail_token_budget=46_240,
++        summary_target_ratio=0.2,
++        context_length=272_000,
++        protect_last_n=10,
++    )
++    agent = SimpleNamespace(context_compressor=compressor)
++    ctx = SimpleNamespace(
++        source=SimpleNamespace(
++            chat_id="mechanical-arm", thread_id=None, user_id="user", user_id_alt=None,
++        ),
++        user_config={
++            "platforms": {
++                "feishu": {
++                    "extra": {
++                        "channel_compression_overrides": {
++                            "mechanical-arm": {"threshold": 0.5, "protect_last_n": 14},
++                        },
++                    },
++                },
++            },
++        },
++    )
++
++    TurnRunner(SimpleNamespace(), ctx)._apply_channel_compression_override(agent, "feishu")
++
++    assert compressor.threshold_percent == 0.5
++    assert compressor.threshold_tokens == 136_000
++    assert compressor.tail_token_budget == 27_200
++    assert compressor.protect_last_n == 14
++
++
++def test_feishu_stream_footer_is_attached_before_finalize(monkeypatch):
++    formatter = MagicMock(return_value="已完成 · 耗时 1.2s · gpt-5.6")
++    consumer = SimpleNamespace(
++        adapter=SimpleNamespace(format_stream_footer=formatter),
++        set_final_metadata=MagicMock(),
++    )
++    agent = SimpleNamespace(
++        context_compressor=SimpleNamespace(last_prompt_tokens=19_000, context_length=272_000),
++        session_prompt_tokens=20_000,
++        session_completion_tokens=145,
++        session_cache_read_tokens=18_000,
++        session_cache_write_tokens=1_000,
++        model="openai-codex/gpt-5.6",
++    )
++    ctx = SimpleNamespace(
++        source=SimpleNamespace(platform=Platform.FEISHU),
++        user_config={"display": {"platforms": {"feishu": {"runtime_footer": {"enabled": True}}}}},
++        agent_holder=[agent],
++        agent_run_started_at=0,
++    )
++    monkeypatch.setattr("gateway.runtime_footer.resolve_footer_config", lambda *_args: {"enabled": True})
++
++    attached = TurnRunner(SimpleNamespace(), ctx)._attach_stream_footer(
++        {"failed": False}, consumer
++    )
++
++    assert attached is True
++    consumer.set_final_metadata.assert_called_once_with(
++        feishu_stream_footer="已完成 · 耗时 1.2s · gpt-5.6"
++    )
++    assert formatter.call_args.kwargs["cache_read_tokens"] == 18_000
++    assert formatter.call_args.kwargs["cache_write_tokens"] == 1_000
+diff --git a/tests/hermes_cli/test_companion_cli_updates.py b/tests/hermes_cli/test_companion_cli_updates.py
+new file mode 100644
+index 0000000..cbd7d7b
+--- /dev/null
++++ b/tests/hermes_cli/test_companion_cli_updates.py
+@@ -0,0 +1,97 @@
++"""Regression tests for chat-triggered companion CLI updates."""
++
++from __future__ import annotations
++
++import json
++import subprocess
++import sys
++from pathlib import Path
++from unittest.mock import Mock, patch
++
++from hermes_cli import companion_cli_updates as companion
++from hermes_cli import update_cmd
++
++
++def test_discover_outdated_npm_clis_keeps_only_real_cli_packages(tmp_path: Path):
++    root = tmp_path / "node_modules"
++    cli_dir = root / "example-cli"
++    library_dir = root / "example-library"
++    excluded_dir = root / "@colinlu50" / "openclaw-lark-stream"
++    cli_dir.mkdir(parents=True)
++    library_dir.mkdir(parents=True)
++    excluded_dir.mkdir(parents=True)
++    (cli_dir / "package.json").write_text(
++        json.dumps({"bin": {"example": "bin/example.js"}}), encoding="utf-8"
++    )
++    (library_dir / "package.json").write_text(
++        json.dumps({"name": "example-library"}), encoding="utf-8"
++    )
++    (excluded_dir / "package.json").write_text(
++        json.dumps({"bin": {"lark-stream": "bin/install.js"}}), encoding="utf-8"
++    )
++    payload = {
++        "example-cli": {"current": "1.0.0", "latest": "2.0.0"},
++        "example-library": {"current": "1.0.0", "latest": "2.0.0"},
++        "@colinlu50/openclaw-lark-stream": {
++            "current": "1.0.0",
++            "latest": "2.0.0",
++        },
++    }
++    run = Mock(
++        return_value=subprocess.CompletedProcess(
++            args=[], returncode=1, stdout=json.dumps(payload), stderr=""
++        )
++    )
++
++    discovered = companion.discover_outdated_npm_clis(
++        npm="npm", npm_root=root, run=run
++    )
++
++    assert list(discovered) == ["example-cli"]
++
++
++def test_missing_agent_browser_is_not_installed_implicitly(tmp_path: Path):
++    with (
++        patch.object(companion, "_npm_root", return_value=tmp_path),
++        patch.object(companion.shutil, "which", return_value=None),
++        patch.object(companion, "_run") as run,
++    ):
++        repaired = companion._ensure_agent_browser_entrypoint(
++            npm="npm", env={}
++        )
++
++    assert repaired is False
++    run.assert_not_called()
++
++
++def test_companion_failure_does_not_abort_hermes_update(capsys):
++    with (
++        patch.object(companion, "companion_cli_updates_enabled", return_value=True),
++        patch.object(
++            companion,
++            "update_companion_clis",
++            side_effect=RuntimeError("registry unavailable"),
++        ),
++    ):
++        result = companion.maybe_update_companion_clis(gateway_mode=True)
++
++    assert result == []
++    output = capsys.readouterr().out
++    assert "Companion CLI update incomplete" in output
++    assert "registry unavailable" in output
++
++
++def test_companion_update_is_skipped_outside_gateway_mode():
++    with patch.object(companion, "update_companion_clis") as update:
++        assert companion.maybe_update_companion_clis(gateway_mode=False) == []
++
++    update.assert_not_called()
++
++
++def test_update_pipeline_keeps_companion_callable_across_checkout(monkeypatch):
++    """The running updater must retain its helper after source replacement."""
++    bound = update_cmd._maybe_update_companion_clis
++    monkeypatch.delitem(sys.modules, "hermes_cli.companion_cli_updates")
++
++    with patch.object(companion, "companion_cli_updates_enabled", return_value=False):
++        assert bound(gateway_mode=True) == []
+diff --git a/tests/tools/test_delegate_sync_platform.py b/tests/tools/test_delegate_sync_platform.py
+new file mode 100644
+index 0000000..5476e48
+--- /dev/null
++++ b/tests/tools/test_delegate_sync_platform.py
+@@ -0,0 +1,17 @@
++from unittest.mock import patch
++
++from tools.delegate_tool import _synchronous_platform_requested
++
++
++def test_synchronous_platform_requested_for_feishu():
++    with patch("gateway.session_context.get_session_env", return_value="feishu"):
++        assert _synchronous_platform_requested({
++            "synchronous_platforms": ["feishu", "weixin"],
++        }) == "feishu"
++
++
++def test_synchronous_platform_not_requested_for_other_channels():
++    with patch("gateway.session_context.get_session_env", return_value="api_server"):
++        assert _synchronous_platform_requested({
++            "synchronous_platforms": "feishu,weixin",
++        }) == ""
