@@ -1,0 +1,159 @@
+From cda3c48a6005b3ff683b55775dbf0f61573015a9 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E8=B0=A2=E5=AD=9F=E7=A7=A6?=
+ <xiemengqin@pigger-hackintosh.local>
+Date: Sun, 6 Sep 2026 00:57:01 +0800
+Subject: [PATCH] fix: reconcile unconfirmed single-card final delivery in
+ place
+
+---
+ gateway/run_turn.py                           | 21 ++++
+ .../test_single_card_finalize_recovery.py     | 96 +++++++++++++++++++
+ 2 files changed, 117 insertions(+)
+ create mode 100644 tests/gateway/test_single_card_finalize_recovery.py
+
+diff --git a/gateway/run_turn.py b/gateway/run_turn.py
+index 594a1cd4c..72d743281 100644
+--- a/gateway/run_turn.py
++++ b/gateway/run_turn.py
+@@ -3568,8 +3568,12 @@ class GatewayTurnMixin:
+         ``response["already_sent"]`` and log ``ok``. ``fail_result`` (None = trust the call) logs a
+         returned failure as ``(session, error)``; ``fail_exc`` logs an exception as ``(session, exc)``."""
+         try:
++            edit_kwargs = {}
++            if getattr(type(_sc.adapter), "STREAM_PROGRESS_IN_CONTENT", False) is True:
++                edit_kwargs["metadata"] = getattr(_sc, "metadata", None)
+             _res = await _sc.adapter.edit_message(
+                 chat_id=source.chat_id, message_id=_sc.message_id, content=content, finalize=True,
++                **edit_kwargs,
+             )
+         except Exception as _edit_err:
+             logger.warning(fail_exc, _sk, _edit_err)
+@@ -3655,6 +3659,23 @@ class GatewayTurnMixin:
+                     fail_result=None, fail_exc="Failed to edit streamed message for session %s: %s",
+                 )
+         elif _sc is not None:
++            # Cancelling the flush wait does not cancel an SDK request already running in
++            # a worker thread. The card may contain the final while its ack was lost;
++            # reconcile that same card before considering a duplicate plain send.
++            _msg_id = _sc.message_id
++            if (
++                getattr(type(getattr(_sc, "adapter", None)), "STREAM_PROGRESS_IN_CONTENT", False) is True
++                and _msg_id and _msg_id != "__no_edit__"
++                and not getattr(_sc, "_turn_split_delivery", False)
++            ):
++                await self._run_agent_edit_streamed_message(
++                    _sc, source, response, _final, _sk=_sk,
++                    ok=("Reconciled unconfirmed single-card finalize for session %s on message %s; no additional message sent.", _sk, _msg_id),
++                    fail_result="Single-card reconciliation failed for session %s (%s); normal delivery remains available.",
++                    fail_exc="Single-card reconciliation raised for session %s: %s; normal delivery remains available.",
++                )
++                if response.get("already_sent"):
++                    return
+             # DUPLICATE-RISK DIAGNOSTIC: a stream consumer existed but suppression did NOT fire; log the
+             # decision inputs ("signal never set" vs "ack-pending race").
+             logger.warning(
+diff --git a/tests/gateway/test_single_card_finalize_recovery.py b/tests/gateway/test_single_card_finalize_recovery.py
+new file mode 100644
+index 000000000..03258bc0a
+--- /dev/null
++++ b/tests/gateway/test_single_card_finalize_recovery.py
+@@ -0,0 +1,96 @@
++"""An unconfirmed card finalize must reconcile in place, without losing the final."""
++
++import asyncio
++from types import SimpleNamespace
++
++import pytest
++
++from gateway.config import Platform, PlatformConfig
++from gateway.platforms.base import BasePlatformAdapter, SendResult
++from gateway.run import GatewayRunner
++from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
++from plugins.platforms.feishu.adapter import FeishuAdapter
++
++
++class CardTransport(BasePlatformAdapter):
++    STREAM_PROGRESS_IN_CONTENT = FeishuAdapter.STREAM_PROGRESS_IN_CONTENT
++    REQUIRES_EDIT_FINALIZE = FeishuAdapter.REQUIRES_EDIT_FINALIZE
++
++    def __init__(self):
++        super().__init__(PlatformConfig(enabled=True), Platform.FEISHU)
++        self.messages = {}
++        self.edits = []
++        self.cancel_ack = False
++        self.reject_edit = False
++
++    async def connect(self, *, is_reconnect=False):
++        return True
++
++    async def disconnect(self):
++        pass
++
++    async def send_typing(self, chat_id, metadata=None):
++        pass
++
++    async def get_chat_info(self, chat_id):
++        return {"id": chat_id}
++
++    async def send(self, chat_id, content, reply_to=None, metadata=None):
++        message_id = f"card-{len(self.messages) + 1}"
++        self.messages[message_id] = content
++        return SendResult(success=True, message_id=message_id)
++
++    async def edit_message(self, chat_id, message_id, content, *, finalize=False, metadata=None):
++        self.edits.append((message_id, content, finalize, metadata))
++        if self.reject_edit:
++            return SendResult(success=False, error="card deleted")
++        self.messages[message_id] = content
++        if self.cancel_ack:
++            # The remote update landed before the local coroutine lost its ack.
++            raise asyncio.CancelledError()
++        return SendResult(success=True, message_id=message_id)
++
++
++@pytest.mark.asyncio
++async def test_cancelled_card_ack_reconciles_final_and_footer_without_new_message():
++    adapter = CardTransport()
++    footer = {"runtime_footer": {"model": "test-model"}}
++    consumer = GatewayStreamConsumer(adapter, "chat", StreamConsumerConfig(cursor=""), metadata=footer)
++    await consumer._send_or_edit("working")
++    adapter.cancel_ack = True
++    with pytest.raises(asyncio.CancelledError):
++        await consumer._finalize_edit("answer")
++    assert not consumer.final_content_delivered
++    adapter.cancel_ack = False
++    response = {"final_response": "answer"}
++    turn = SimpleNamespace(stream_consumer_holder=[consumer], source=SimpleNamespace(chat_id="chat"), session_key="session")
++    runner = object.__new__(GatewayRunner)
++    await runner._run_agent_mark_streamed_delivery(response, turn)
++    if not response.get("already_sent"):
++        await adapter.send("chat", response["final_response"])
++    assert adapter.messages == {consumer.message_id: "answer"}
++    assert adapter.edits[-1] == (consumer.message_id, "answer", True, footer)
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("case", ["deleted", "split", "no_card", "ordinary_transport", "failed_turn"])
++async def test_unconfirmed_or_failed_delivery_is_not_silently_suppressed(case):
++    adapter = CardTransport()
++    consumer = GatewayStreamConsumer(adapter, "chat", StreamConsumerConfig(cursor=""))
++    if case != "no_card":
++        await consumer._send_or_edit("working")
++    adapter.reject_edit = case == "deleted"
++    consumer._turn_split_delivery = case == "split"
++    if case == "ordinary_transport":
++        class OrdinaryTransport(CardTransport):
++            STREAM_PROGRESS_IN_CONTENT = False
++        adapter.__class__ = OrdinaryTransport
++    response = {"final_response": "unseen answer", "failed": case == "failed_turn"}
++    turn = SimpleNamespace(stream_consumer_holder=[consumer], source=SimpleNamespace(chat_id="chat"), session_key="session")
++    runner = object.__new__(GatewayRunner)
++    await runner._run_agent_mark_streamed_delivery(response, turn)
++    assert not response.get("already_sent")
++    if case == "deleted":
++        assert adapter.edits, "try the original card before falling back"
++    else:
++        assert not adapter.edits
+-- 
+2.50.1 (Apple Git-155)
+
