@@ -84,6 +84,8 @@ def _desired_updates(jobs: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any
     for job_id in KNOWN_JOB_IDS:
         if job_id in jobs:
             updates[job_id] = {"failure_deliver": failure_target}
+            if jobs[job_id].get("model"):
+                updates[job_id].update(model="gpt-6-astra", provider="openai-codex")
 
     if "88f721888bfa" in jobs:
         updates["88f721888bfa"]["deliver"] = failure_target

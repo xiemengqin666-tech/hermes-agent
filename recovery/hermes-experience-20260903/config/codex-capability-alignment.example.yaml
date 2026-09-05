@@ -1,13 +1,20 @@
 # Merge these values into each Hermes profile. Keep credentials in .env.
 model:
-  default: gpt-5.6-sol
+  default: gpt-6-astra
   provider: openai-codex
 
 agent:
   max_turns: 200
   service_tier: normal
   disabled_toolsets: []
-  reasoning_effort: high
+  reasoning_effort: medium
+  coding_context: auto
+  task_completion_guidance: true
+  parallel_tool_call_guidance: true
+  environment_probe: true
+  verify_on_stop: auto
+  max_verify_nudges: 2
+  verify_guidance: false
 
 compression:
   enabled: true
@@ -20,22 +27,22 @@ session_reset:
 auxiliary:
   compression:
     provider: openai-codex
-    model: gpt-5.6-sol
+    model: gpt-6-astra
   title_generation:
     provider: openai-codex
-    model: gpt-5.6-sol
+    model: gpt-6-astra
   triage_specifier:
     provider: openai-codex
-    model: gpt-5.6-sol
+    model: gpt-6-astra
   kanban_decomposer:
     provider: openai-codex
-    model: gpt-5.6-sol
+    model: gpt-6-astra
 
 delegation:
   provider: openai-codex
-  model: gpt-5.6-sol
+  model: gpt-6-astra
   max_iterations: 250
-  reasoning_effort: high
+  reasoning_effort: medium
   max_concurrent_children: 10
   inherit_mcp_toolsets: true
   subagent_auto_approve: true

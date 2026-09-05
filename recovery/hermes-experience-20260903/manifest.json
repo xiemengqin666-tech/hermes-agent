@@ -1,10 +1,11 @@
 {
   "snapshot": "2026-09-03",
+  "revalidated": "2026-09-05",
   "hermes": {
     "version": "0.21.0",
     "legacy_base_commit": "f98f5e74e00e54c36088fa2e78171e2a408ba7c9",
-    "current_base_commit": "05f548f35dd3242bf2ff74743e9112acde251f77",
-    "latest_tested_base_commit": "05f548f35dd3242bf2ff74743e9112acde251f77"
+    "current_base_commit": "5ac75e91e2012497db474835a58e0139e89047cd",
+    "latest_tested_base_commit": "5ac75e91e2012497db474835a58e0139e89047cd"
   },
   "runtime_patches": [
     {
@@ -14,10 +15,10 @@
       "file_count": 18
     },
     {
-      "path": "patches/0002-runtime-experience-05f548f.patch",
-      "base_commit": "05f548f35dd3242bf2ff74743e9112acde251f77",
-      "sha256": "453b98a16dedee06604f9023c808d6d4a35e8e8d17242cdb8ecde5264894b323",
-      "file_count": 16
+      "path": "patches/0002-runtime-experience-5ac75e9.patch",
+      "base_commit": "5ac75e91e2012497db474835a58e0139e89047cd",
+      "sha256": "69bf02b73e1039d871b987dd39c75d50689836a53da196442c3e19a451ea7653",
+      "file_count": 28
     }
   ],
   "feishu_stream": {
@@ -47,23 +48,31 @@
     "device_url_included": false
   },
   "companion_clis": {
-    "codex": "0.153.0",
+    "codex": "0.153.4",
     "lark": "1.0.93",
-    "claude_code": "2.1.259",
+    "claude_code": "2.1.261",
     "agent_browser": "0.36.0",
     "agent_wechat": "0.12.0",
     "openspec": "1.12.0",
-    "openspec_playwright": "0.3.84",
+    "openspec_playwright": "0.3.86",
     "opencli": "1.8.7"
   },
   "codex_alignment": {
-    "model": "gpt-5.6-sol",
-    "reasoning_effort": "high",
+    "model": "gpt-6-astra",
+    "reasoning_effort": "medium",
     "max_turns": 200,
     "delegation_max_iterations": 250,
     "delegation_max_concurrent_children": 10,
     "service_tier": "normal",
-    "browser_executable": "Microsoft Edge"
+    "browser_executable": "Microsoft Edge",
+    "coding_context": "auto",
+    "verify_on_stop": "auto",
+    "max_verify_nudges": 2,
+    "oneshot_inherits_launch_cwd": true,
+    "canonical_unittest_detection": true,
+    "stop_after_fresh_verification": true,
+    "workflow_rules_in_soul": true,
+    "codex_catalog_context_tokens": 272000
   },
   "content_assistant": {
     "compression_threshold": 0.6,

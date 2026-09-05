@@ -6,7 +6,7 @@ HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 HERMES_REPO="${HERMES_REPO:-$HERMES_HOME/hermes-agent}"
 PATCHES=(
   "$ROOT/patches/0001-runtime-experience-f98f5e7.patch"
-  "$ROOT/patches/0002-runtime-experience-05f548f.patch"
+  "$ROOT/patches/0002-runtime-experience-5ac75e9.patch"
 )
 PLUGIN_DIR="$HERMES_HOME/plugins/openclaw-lark-stream"
 WEIXIN_PLUGIN_DIR="$HERMES_HOME/plugins/weixin-experience"
@@ -80,6 +80,9 @@ fi
 "$PYTHON" "$ROOT/scripts/normalize_profile_settings.py" \
   --home "$HERMES_HOME" --check
 
+"$PYTHON" "$ROOT/scripts/verify_browser_routing.py" \
+  --home "$HERMES_HOME" --hermes-repo "$HERMES_REPO"
+
 "$PYTHON" -m py_compile \
   "$PLUGIN_DIR/__init__.py" \
   "$WEIXIN_PLUGIN_DIR/__init__.py" \
@@ -90,7 +93,7 @@ fi
 
 if [[ -f "$HERMES_HOME/workspace/AGENTS.md" ]]; then
   "$PYTHON" "$ROOT/scripts/normalize_workspace_rules.py" --check \
-    "$HERMES_HOME/workspace/AGENTS.md"
+    "$HERMES_HOME/workspace/AGENTS.md" --souls-home "$HERMES_HOME"
 fi
 
 if [[ -f "$HERMES_HOME/cron/jobs.json" ]]; then
@@ -101,7 +104,15 @@ fi
 
 if "$PYTHON" -c 'import pytest' >/dev/null 2>&1; then
   TEST_CANDIDATES=(
+    "$HERMES_REPO/tests/agent/transports/test_codex_transport.py"
     "$HERMES_REPO/tests/agent/test_account_usage.py"
+    "$HERMES_REPO/tests/agent/test_coding_context.py"
+    "$HERMES_REPO/tests/agent/test_runtime_cwd.py"
+    "$HERMES_REPO/tests/agent/test_system_prompt.py"
+    "$HERMES_REPO/tests/agent/test_verification_evidence.py"
+    "$HERMES_REPO/tests/agent/test_verification_stop.py"
+    "$HERMES_REPO/tests/gateway/test_stream_consumer.py"
+    "$HERMES_REPO/tests/gateway/test_channel_compression_override.py"
     "$HERMES_REPO/tests/gateway/test_feishu.py"
     "$HERMES_REPO/tests/gateway/test_incomplete_gateway_turns.py"
     "$HERMES_REPO/tests/gateway/test_weixin.py"
@@ -109,8 +120,12 @@ if "$PYTHON" -c 'import pytest' >/dev/null 2>&1; then
     "$HERMES_REPO/tests/gateway/test_update_command.py"
     "$HERMES_REPO/tests/gateway/test_update_streaming.py"
     "$HERMES_REPO/tests/gateway/test_update_cron_drain.py"
+    "$HERMES_REPO/tests/gateway/test_run_progress_topics.py"
+    "$HERMES_REPO/tests/gateway/test_queued_native_image_session_key.py"
     "$HERMES_REPO/tests/cron/test_cron_failure_deliver.py"
     "$HERMES_REPO/tests/hermes_cli/test_companion_cli_updates.py"
+    "$HERMES_REPO/tests/hermes_cli/test_tui_resume_flow.py"
+    "$HERMES_REPO/tests/tools/test_delegate_sync_platform.py"
     "$SKILL_DIR/tests/test_delivery_manifest.py"
   )
   TESTS=()

@@ -1,0 +1,51 @@
+{
+  "date": "2026-09-05",
+  "model": "gpt-6-astra",
+  "provider": "openai-codex",
+  "reasoning_effort": "medium",
+  "service_tier": "normal",
+  "profiles_verified": 5,
+  "pinned_conversation_routes_verified": 49,
+  "gateway_conversations_retained": 80,
+  "codex_live_catalog_context_tokens": 272000,
+  "coding_smoke": {
+    "runtime": "Hermes CLI one-shot using gpt-6-astra, medium reasoning, normal service tier",
+    "first_attempt_completed": true,
+    "launch_cwd_inherited_by_prompt_and_tools": true,
+    "public_tests_passed": 12,
+    "hidden_tests_passed": 11,
+    "patch_tool_used": true,
+    "user_owned_sentinel_unchanged": true,
+    "changed_files": ["streammerge/merge.py", "tests/test_merge.py"],
+    "elapsed_seconds": 157.65,
+    "api_calls": 7,
+    "uncached_input_tokens": 43547,
+    "cache_read_tokens": 208640,
+    "output_tokens": 3106,
+    "fixture_note": "The original prompt was rerun unchanged in a fresh repository without an absolute-path hint or retry.",
+    "verification_note": "The canonical unittest suite produced full passing evidence. No temporary ad-hoc verification or duplicate post-pass test run occurred."
+  },
+  "regression_tests": {
+    "coding_and_reasoning_passed": 186,
+    "messaging_update_luckin_transport_passed": 324,
+    "preexisting_environment_isolation_test_deselected": 1
+  },
+  "runtime_checks": {
+    "official_gateway_restart_succeeded": true,
+    "installed_hermes_gateway_status_matches_service": true,
+    "feishu_accounts_connected": "2/2",
+    "weixin_accounts_connected": "4/4",
+    "api_chat_http_status": 200,
+    "api_reply": "API-GPT6-OK",
+    "api_backend_model_verified_in_session_database": "gpt-6-astra",
+    "cron_scheduler_started": true,
+    "resume_pending": 0,
+    "live_turn_leases_after_probe": 0
+  },
+  "new_runtime_source_patches": 4,
+  "upstream_sources": [
+    "https://developers.openai.com/api/docs/models/gpt-6-astra",
+    "https://developers.openai.com/api/docs/guides/latest-model"
+  ],
+  "secrets_included": false
+}

@@ -6,7 +6,7 @@ HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 HERMES_REPO="${HERMES_REPO:-$HERMES_HOME/hermes-agent}"
 PATCHES=(
   "$ROOT/patches/0001-runtime-experience-f98f5e7.patch"
-  "$ROOT/patches/0002-runtime-experience-05f548f.patch"
+  "$ROOT/patches/0002-runtime-experience-5ac75e9.patch"
 )
 PLUGIN_SOURCE="$ROOT/plugins/openclaw-lark-stream"
 PLUGIN_DIR="$HERMES_HOME/plugins/openclaw-lark-stream"
@@ -131,7 +131,7 @@ rm -rf "$HERMES_HOME/plugins/ponytail"
 rm -f "$HERMES_HOME/workspace/ponytail_append.md"
 if [[ -f "$HERMES_HOME/workspace/AGENTS.md" ]]; then
   python3 "$ROOT/scripts/normalize_workspace_rules.py" \
-    "$HERMES_HOME/workspace/AGENTS.md"
+    "$HERMES_HOME/workspace/AGENTS.md" --souls-home "$HERMES_HOME"
 fi
 
 PYTHON="$HERMES_REPO/venv/bin/python"

@@ -152,6 +152,7 @@ class MultiFeishuAdapter(BasePlatformAdapter):
         FeishuAdapter, "STREAM_PROGRESS_IN_SINGLE_CARD", False
     )
     REQUIRES_EDIT_FINALIZE = getattr(FeishuAdapter, "REQUIRES_EDIT_FINALIZE", False)
+    STREAM_PROGRESS_IN_CONTENT = True
     SUPPORTS_MESSAGE_EDITING = True
     supports_code_blocks = getattr(FeishuAdapter, "supports_code_blocks", True)
 

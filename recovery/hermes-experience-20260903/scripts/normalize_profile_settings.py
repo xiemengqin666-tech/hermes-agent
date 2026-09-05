@@ -13,28 +13,54 @@ from ruamel.yaml.comments import CommentedMap
 
 
 EXPECTED: dict[str, Any] = {
-    "model.default": "gpt-5.6-sol",
+    "model.default": "gpt-6-astra",
     "model.provider": "openai-codex",
     "agent.max_turns": 200,
     "agent.service_tier": "normal",
-    "agent.reasoning_effort": "high",
+    "agent.reasoning_effort": "medium",
+    "agent.coding_context": "auto",
+    "agent.task_completion_guidance": True,
+    "agent.parallel_tool_call_guidance": True,
+    "agent.environment_probe": True,
+    "agent.verify_on_stop": "auto",
+    "agent.max_verify_nudges": 2,
+    "agent.verify_guidance": False,
+    "agent.coding_instructions": (
+        "For coding tasks, read the repository instructions and git status first. "
+        "Use explicit absolute paths and terminal cwd for the target repository; "
+        "do not assume the CLI directory changes the configured terminal cwd. "
+        "Use CodeGraph for indexed symbol/call-flow questions and rg for literal text. "
+        "Implement narrow changes with patch tools, preserve unrelated user edits, "
+        "and run focused tests before reporting completion. For UI changes, inspect "
+        "the rendered result using Microsoft Edge only. Delegate only independent "
+        "work and wait for required results; do not delegate simple fixes. Report "
+        "actual changes, verification results and blockers concisely, without "
+        "pasting code unless requested. After verification follow-ups, summarize "
+        "the original task's changes as well as the checks. Never restart services or publish changes "
+        "unless required by the user's task."
+    ),
     "compression.enabled": True,
     "compression.threshold": 0.75,
     "compression.target_ratio": 0.2,
     "auxiliary.compression.provider": "openai-codex",
-    "auxiliary.compression.model": "gpt-5.6-sol",
+    "auxiliary.compression.model": "gpt-6-astra",
     "auxiliary.title_generation.provider": "openai-codex",
-    "auxiliary.title_generation.model": "gpt-5.6-sol",
+    "auxiliary.title_generation.model": "gpt-6-astra",
     "auxiliary.triage_specifier.provider": "openai-codex",
-    "auxiliary.triage_specifier.model": "gpt-5.6-sol",
+    "auxiliary.triage_specifier.model": "gpt-6-astra",
     "auxiliary.kanban_decomposer.provider": "openai-codex",
-    "auxiliary.kanban_decomposer.model": "gpt-5.6-sol",
+    "auxiliary.kanban_decomposer.model": "gpt-6-astra",
     "delegation.provider": "openai-codex",
-    "delegation.model": "gpt-5.6-sol",
-    "delegation.reasoning_effort": "high",
+    "delegation.model": "gpt-6-astra",
+    "delegation.reasoning_effort": "medium",
     "goals.max_turns": 200,
     "approvals.mode": "off",
     "session_reset.mode": "none",
+    # Unset backend selects Browser Use, which ignores the Edge executable pin.
+    "browser.backend": "off",
+    "browser.cloud_provider": "local",
+    "browser.use_real_profile": False,
+    "browser.cdp_url": "",
 }
 
 EDGE = "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
@@ -71,6 +97,21 @@ def _config_paths(home: Path) -> list[Path]:
     return [home / "config.yaml", *sorted((home / "profiles").glob("*/config.yaml"))]
 
 
+def _conversation_routes(data: dict):
+    roots = [data.get("feishu", {}), data.get("weixin", {})]
+    for platform in (data.get("platforms") or {}).values():
+        if isinstance(platform, dict):
+            roots.extend((platform, platform.get("extra") or {}))
+    for root in roots:
+        if not isinstance(root, dict):
+            continue
+        for route in (root.get("channel_model_overrides") or {}).values():
+            if isinstance(route, dict):
+                yield route
+        if isinstance(root.get("default_model"), dict):
+            yield root["default_model"]
+
+
 def _collect_errors(home: Path) -> list[str]:
     yaml = YAML(typ="safe")
     errors: list[str] = []
@@ -80,6 +121,9 @@ def _collect_errors(home: Path) -> list[str]:
             value = _get(data, dotted)
             if value != wanted:
                 errors.append(f"{path}: {dotted}={value!r}, expected {wanted!r}")
+        for route in _conversation_routes(data):
+            if route.get("model") != EXPECTED["model.default"] or route.get("provider") != "openai-codex":
+                errors.append(f"{path}: a conversation route does not match the default model/provider")
 
         env_path = path.parent / ".env"
         values = dotenv_values(env_path)
@@ -101,6 +145,11 @@ def _normalize(home: Path) -> None:
             if _get(data, dotted) != wanted:
                 _set(data, dotted, wanted)
                 changed = True
+        for route in _conversation_routes(data):
+            for key, wanted in (("model", EXPECTED["model.default"]), ("provider", "openai-codex")):
+                if route.get(key) != wanted:
+                    route[key] = wanted
+                    changed = True
         if changed:
             with path.open("w", encoding="utf-8") as handle:
                 yaml.dump(data, handle)
